@@ -42,6 +42,7 @@
     { "id": "insomnia",          "name": "Insomnia",             "attr": "insomnia",                   "category": "Development",   "arch": "insomnia-bin" },
     { "id": "meld",              "name": "Meld",                 "attr": "meld",                       "category": "Development",   "arch": "meld" },
     { "id": "ghidra",            "name": "Ghidra",               "attr": "ghidra",                     "category": "Development",   "arch": "ghidra" },
+    { "id": "devenv",            "name": "devenv",               "attr": "devenv",                     "category": "Development" },
 
     { "id": "keepassxc",         "name": "KeePassXC",            "attr": "keepassxc",                  "category": "Utilities",     "arch": "keepassxc" },
     { "id": "bitwarden",         "name": "Bitwarden",            "attr": "bitwarden-desktop",          "category": "Utilities",     "arch": "bitwarden" },
