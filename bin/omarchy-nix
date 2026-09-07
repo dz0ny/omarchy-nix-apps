@@ -1526,7 +1526,8 @@ ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectu
   ${C_BOLD}list${C_RESET} [--json]             What is installed in the Nix profile
   ${C_BOLD}update${C_RESET} [app...]           Upgrade everything, or just these
   ${C_BOLD}exec${C_RESET} <command> [args]     Run a Nix app with the graphics driver wired up
-  ${C_BOLD}gl${C_RESET} [--refresh|--probe]   Install or update that driver, or re-probe the renderer
+  ${C_BOLD}gl${C_RESET} [--refresh|--probe]    Install or update that driver, or re-probe the renderer
+  ${C_BOLD}sync${C_RESET}                      Re-mirror the Nix desktop entries into the launcher
   ${C_BOLD}search${C_RESET} <query>            Search nixpkgs
   ${C_BOLD}catalog${C_RESET} [--json]          Show the curated app catalogue
   ${C_BOLD}verify${C_RESET}                    Check every catalogue entry against $SYSTEM and cache it
