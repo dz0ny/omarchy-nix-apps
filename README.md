@@ -71,6 +71,9 @@ omarchy-nix remove <app>...
 omarchy-nix list [--json]
 omarchy-nix update [app...]
 omarchy-nix updates [--brief]    What an upgrade would change (cached)
+omarchy-nix exec <cmd> [args]    Run a Nix app with the graphics driver wired up
+omarchy-nix gl [--refresh]       Install or update that driver
+omarchy-nix sync                 Re-mirror the desktop entries
 omarchy-nix index [--refresh]    Rebuild the list of packages that build here
 omarchy-nix search <query>
 omarchy-nix catalog [--json]
@@ -141,6 +144,46 @@ sees:
 instead of downloading for ten minutes and failing at the end. `--no-check`
 skips it.
 
+**A graphics driver.** A nixpkgs GUI app ships libglvnd but no driver. On NixOS
+the driver comes from `/run/opengl-driver`; on Arch that path does not exist,
+libglvnd finds no EGL vendor, and the app dies at startup with
+
+```
+No provider of eglGetPlatformDisplayEXT found.  Requires one of:
+    EGL_EXT_platform_base
+```
+
+The host's mesa cannot fill the gap — it is built against a newer glibc than
+the one in the app's closure, and putting `/usr/lib` on `LD_LIBRARY_PATH` takes
+the whole process down, wrapper shell included. So the driver comes from
+nixpkgs too: `omarchy-nix gl` installs a mesa into a profile of its own under
+`~/.local/state/omarchy-nix/gl`, and `omarchy-nix exec` points an app at it.
+
+It is applied **per app, never session-wide**. Forcing this mesa on the
+pacman-managed desktop would put Hyprland's own EGL at risk, and losing the
+compositor costs more than a GUI app that will not start. If you launch
+something from a terminal and it cannot find a driver, run it through the
+wrapper:
+
+```bash
+omarchy-nix exec localsend_app
+```
+
+**Desktop entries are mirrored, not just exposed.** Two problems, one answer.
+The launcher watches the applications directories that existed when it
+started; `~/.nix-profile/share/applications` is a symlink into the store, and
+every install builds a new generation, so that directory is *replaced* rather
+than modified. No inotify event fires, and a newly installed app stays
+invisible until the shell restarts. And the graphics wiring above has to be
+attached per app, which means owning the `Exec` line.
+
+So install, remove and update mirror every Nix `.desktop` into
+`~/.local/share/applications` — same filename, so it is the same desktop file
+id and `XDG_DATA_HOME` wins over `XDG_DATA_DIRS`, replacing the profile's copy
+in the launcher rather than doubling it — with `Exec` routed through
+`omarchy-nix exec` and an `X-Omarchy-Nix=true` marker so the plugin only ever
+prunes its own. `omarchy-nix sync` redoes it by hand.
+
 ## The catalogue
 
 `apps.json` is a curated list of ~50 large applications with their nixpkgs
@@ -197,8 +240,14 @@ question in the terminal, and is what the widget reads.
 **The package list is out of date.** `omarchy-nix index --refresh`, or
 `Install → Nix → Rebuild Index`. It rebuilds itself weekly on its own.
 
-**An app installed but does not show in the launcher.** The session env only
-loads at login — log out and back in, then `omarchy-nix doctor`.
+**A Nix app dies at startup with an EGL error.** It has no graphics driver:
+`omarchy-nix gl`, then launch it again. `omarchy-nix doctor` reports whether
+the driver is in place.
+
+**An app installed but does not show in the launcher.** `omarchy-nix sync`
+re-mirrors the entries; `omarchy-nix doctor` says how many are mirrored. If it
+is the very first install, the session env also has to be in place, and that
+only loads at login — log out and back in.
 
 **Disk filling up.** `omarchy-nix gc` drops profile generations older than 30
 days and collects garbage.

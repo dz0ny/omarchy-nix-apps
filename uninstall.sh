@@ -27,6 +27,16 @@ if [[ -f $EXT_FILE ]]; then
   ok "$EXT_FILE"
 fi
 
+info "Removing the mirrored desktop entries"
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+count=0
+for f in "$APPS_DIR"/*.desktop; do
+  [[ -f $f ]] || continue
+  grep -q '^X-Omarchy-Nix=true$' "$f" 2>/dev/null || continue
+  rm -f "$f" && ((count++))
+done
+ok "$count entr(ies) removed from $APPS_DIR"
+
 if [[ -f $ENV_FILE ]]; then
   info "Removing the session environment file"
   rm -f "$ENV_FILE"
@@ -39,7 +49,8 @@ Still on this machine, on purpose:
   - the apps in your Nix profile   remove with: nix profile remove <name>
   - Nix itself                     remove with: /nix/nix-installer uninstall
   - ~/.config/omarchy-nix/config   your settings
-  - ~/.local/state/omarchy-nix     the package list and update caches
+  - ~/.local/state/omarchy-nix     the package list, update caches and the
+                                   graphics driver profile
   - the plugin folder              remove with: omarchy plugin remove dz0ny.nix-apps
 
 EOS

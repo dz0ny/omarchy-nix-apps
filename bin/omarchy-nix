@@ -23,6 +23,10 @@ ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env.d/50-omarchy-nix-apps.sh"
 
 CATALOG="${NIX_APPS_CATALOG:-$PLUGIN_DIR/apps.json}"
 INDEX_FILE="$STATE_DIR/nixpkgs-index.tsv"
+# The graphics driver lives in its own profile: a gcroot that never shows up
+# among the apps you installed.
+GL_PROFILE="$STATE_DIR/gl"
+DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 UPDATES_FILE="$STATE_DIR/updates.json"
 # How stale the update check may get before the next --brief recomputes it.
 UPDATE_MAX_AGE="${NIX_APPS_UPDATE_MAX_AGE:-21600}"
@@ -235,10 +239,148 @@ installed_attr() {
   return 1
 }
 
+# --------------------------------------------------------------- graphics
+
+# A nixpkgs GUI app ships libglvnd but no driver. On NixOS the driver comes
+# from /run/opengl-driver; on Arch that path does not exist, libglvnd finds no
+# EGL vendor, and the app dies at startup with
+#
+#   No provider of eglGetPlatformDisplayEXT found. Requires one of:
+#       EGL_EXT_platform_base
+#
+# The host's mesa cannot fill the gap: it is built against a newer glibc than
+# the one in the app's closure, and putting /usr/lib on LD_LIBRARY_PATH takes
+# down the whole process — the wrapper shell included, with SIGBUS.
+#
+# So the driver comes from nixpkgs too, in a profile of its own: a gcroot, and
+# out of the way of `omarchy-nix list`. It is applied per app and never
+# session-wide, because forcing this mesa on the pacman-managed desktop would
+# put Hyprland's own EGL at risk, and losing the compositor costs more than a
+# GUI app that will not start.
+gl_vendor_json() { printf '%s\n' "$GL_PROFILE/share/glvnd/egl_vendor.d/50_mesa.json"; }
+
+gl_ready() { [[ -r $(gl_vendor_json) ]]; }
+
+ensure_gl() {
+  gl_ready && return 0
+  require_nix
+  info "Installing a nixpkgs mesa for Nix apps to render with"
+  mkdir -p "$STATE_DIR"
+  # `add` is the current spelling; `install` is its deprecated alias, kept for
+  # a nix older than the one setup installs.
+  nixrun profile add --profile "$GL_PROFILE" "$FLAKE#mesa" >/dev/null 2>&1 ||
+    nixrun profile install --profile "$GL_PROFILE" "$FLAKE#mesa" >/dev/null 2>&1 || true
+  if gl_ready; then
+    ok "Graphics driver: $GL_PROFILE"
+  else
+    bad "could not install mesa from $FLAKE — GUI apps may not start"
+    return 1
+  fi
+}
+
+cmd_gl() {
+  case "${1:-}" in
+    --refresh)
+      require_nix
+      info "Updating the graphics driver"
+      nixrun profile upgrade --profile "$GL_PROFILE" --all 2>/dev/null || true
+      gl_ready && ok "Graphics driver: $(readlink -f "$GL_PROFILE")"
+      ;;
+    -h | --help) echo "Usage: omarchy-nix gl [--refresh]" ;;
+    *)
+      ensure_gl || return 1
+      printf '%s\n' "$(gl_env)"
+      ;;
+  esac
+}
+
+# The environment a Nix GUI app needs, as KEY=VALUE lines. Empty when the
+# driver profile is not there, so callers degrade to "try it and see".
+gl_env() {
+  gl_ready || return 0
+  printf '%s\n' \
+    "__EGL_VENDOR_LIBRARY_FILENAMES=$(gl_vendor_json)" \
+    "LIBGL_DRIVERS_PATH=$GL_PROFILE/lib/dri" \
+    "LIBVA_DRIVERS_PATH=$GL_PROFILE/lib/dri"
+}
+
+# What the mirrored .desktop files run, and what you use by hand when an app
+# started from a terminal cannot find a driver.
+cmd_exec() {
+  (($#)) || die "usage: omarchy-nix exec <command> [args...]"
+  if gl_ready; then
+    local vendor
+    vendor=$(gl_vendor_json)
+    export __EGL_VENDOR_LIBRARY_FILENAMES="$vendor"
+    export LIBGL_DRIVERS_PATH="$GL_PROFILE/lib/dri"
+    export LIBVA_DRIVERS_PATH="$GL_PROFILE/lib/dri"
+  fi
+  exec "$@"
+}
+
+# -------------------------------------------------------- desktop entries
+
+# Two problems, one answer.
+#
+# The launcher watches the applications directories that existed when it
+# started. ~/.nix-profile/share/applications is a symlink into the store, and
+# every install builds a new generation, so that directory is *replaced*
+# rather than modified: no inotify event fires, the watch is left on a store
+# path nothing points at any more, and a newly installed app stays invisible
+# until the shell restarts. ~/.local/share/applications is a real directory
+# that already exists and is already watched.
+#
+# And the GL wiring above has to be attached per app, which means owning the
+# Exec line.
+#
+# So every Nix .desktop is mirrored here under the same name. Same desktop
+# file id, and XDG_DATA_HOME is searched before XDG_DATA_DIRS, so this
+# replaces the profile's copy in the launcher rather than doubling it.
+sync_desktop_entries() {
+  local src="$HOME/.nix-profile/share/applications"
+  local f base changed=0
+  mkdir -p "$DESKTOP_DIR"
+
+  # Drop the ones we wrote for apps that are no longer installed.
+  for f in "$DESKTOP_DIR"/*.desktop; do
+    [[ -f $f ]] || continue
+    grep -q '^X-Omarchy-Nix=true$' "$f" 2>/dev/null || continue
+    base="${f##*/}"
+    if [[ ! -f $src/$base ]]; then
+      rm -f "$f"
+      changed=1
+    fi
+  done
+
+  if [[ -d $src ]]; then
+    local tmp
+    for f in "$src"/*.desktop; do
+      [[ -f $f ]] || continue
+      base="${f##*/}"
+      tmp=$(mktemp)
+      awk '
+        /^\[Desktop Entry\]/ { print; print "X-Omarchy-Nix=true"; next }
+        /^Exec[[:space:]]*=/ { sub(/^Exec[[:space:]]*=[[:space:]]*/, "Exec=omarchy-nix exec "); print; next }
+        { print }
+      ' "$f" >"$tmp"
+      if ! cmp -s "$tmp" "$DESKTOP_DIR/$base" 2>/dev/null; then
+        mv "$tmp" "$DESKTOP_DIR/$base"
+        chmod 644 "$DESKTOP_DIR/$base"
+        changed=1
+      else
+        rm -f "$tmp"
+      fi
+    done
+  fi
+
+  ((changed)) || return 0
+  command -v update-desktop-database >/dev/null 2>&1 &&
+    update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1
+  return 0
+}
+
 refresh_desktop_db() {
-  local dir="$HOME/.nix-profile/share/applications"
-  [[ -d $dir ]] || return 0
-  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$dir" >/dev/null 2>&1
+  sync_desktop_entries
   return 0
 }
 
@@ -350,6 +492,7 @@ EOS
 
   require_nix
   info "Nix version: $(nixrun --version 2>/dev/null | head -1)"
+  ensure_gl || true
 
   cat <<EOS
 
@@ -448,7 +591,10 @@ cmd_install() {
   local env=()
   [[ $ALLOW_UNFREE == 1 ]] && env=(NIXPKGS_ALLOW_UNFREE=1)
   if env "${env[@]}" "$NIX" --extra-experimental-features "nix-command flakes" \
-    profile install --impure "${refs[@]}"; then
+    profile add --impure "${refs[@]}"; then
+    # A GUI app with no driver starts and dies, so wire graphics before
+    # anything gets a chance to launch it.
+    ensure_gl || true
     refresh_desktop_db
     ok "Installed: ${labels[*]}"
     notify -g "$GLYPH" "Nix apps installed" "${labels[*]}"
@@ -1100,7 +1246,7 @@ cmd_doctor() {
   info "Desktop integration"
   local apps_dir="$HOME/.nix-profile/share/applications"
   if [[ -d $apps_dir ]]; then
-    ok "$(find "$apps_dir" -name '*.desktop' 2>/dev/null | wc -l) .desktop files in the Nix profile"
+    ok "$(find -L "$apps_dir" -name '*.desktop' 2>/dev/null | wc -l) .desktop files in the Nix profile"
   else
     warn "no .desktop files yet (nothing installed)"
   fi
@@ -1119,6 +1265,25 @@ cmd_doctor() {
       warn "log out and back in — uwsm only reads env.d at session start"
       ;;
   esac
+
+  # The mirrored copies are what the launcher actually reads: it watches this
+  # directory, and never notices a new profile generation on its own.
+  local mirrored=0 profile_entries=0
+  mirrored=$(grep -l '^X-Omarchy-Nix=true$' "$DESKTOP_DIR"/*.desktop 2>/dev/null | wc -l)
+  [[ -d $apps_dir ]] && profile_entries=$(find -L "$apps_dir" -name '*.desktop' 2>/dev/null | wc -l)
+  if ((profile_entries == mirrored)); then
+    ok "$mirrored entr(ies) mirrored into $DESKTOP_DIR"
+  else
+    warn "$mirrored of $profile_entries entries mirrored — run: omarchy-nix sync"
+  fi
+
+  info "Graphics"
+  if gl_ready; then
+    ok "driver: $(readlink -f "$GL_PROFILE" 2>/dev/null)"
+  else
+    warn "no driver yet — nixpkgs GUI apps will fail with \"No provider of"
+    warn "eglGetPlatformDisplayEXT found\". Fix with: omarchy-nix gl"
+  fi
 
   info "Tooling"
   local t
@@ -1168,6 +1333,8 @@ ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectu
   ${C_BOLD}remove${C_RESET} <app>...           Remove from the Nix profile
   ${C_BOLD}list${C_RESET} [--json]             What is installed in the Nix profile
   ${C_BOLD}update${C_RESET} [app...]           Upgrade everything, or just these
+  ${C_BOLD}exec${C_RESET} <command> [args]     Run a Nix app with the graphics driver wired up
+  ${C_BOLD}gl${C_RESET} [--refresh]            Install or update that driver (a nixpkgs mesa)
   ${C_BOLD}search${C_RESET} <query>            Search nixpkgs
   ${C_BOLD}catalog${C_RESET} [--json]          Show the curated app catalogue
   ${C_BOLD}verify${C_RESET}                    Check every catalogue entry against $SYSTEM and cache it
@@ -1200,6 +1367,9 @@ main() {
     menu) cmd_menu "$@" ;;
     pick | browse) cmd_pick "$@" ;;
     updates) cmd_updates "$@" ;;
+    exec) cmd_exec "$@" ;;
+    gl) cmd_gl "$@" ;;
+    sync) require_nix; sync_desktop_entries && ok "Desktop entries synced to $DESKTOP_DIR" ;;
     index) cmd_index "$@" ;;
     info) cmd_info "$@" ;;
     help | -h | --help) usage ;;
