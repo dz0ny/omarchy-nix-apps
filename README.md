@@ -169,6 +169,21 @@ wrapper:
 omarchy-nix exec localsend_app
 ```
 
+**Hardware or software, probed not assumed.** A driver can answer
+`eglInitialize` and still be useless to a GTK app. Under virtio-gpu in a VM,
+virgl exposes OpenGL 2.1 on the Wayland platform and no core profile at all;
+GTK needs a 3.2 core context, fails to create one, and the window comes up
+**black** — the app is running, it just has nothing to draw with. The same
+machine's llvmpipe reports 4.6.
+
+So `omarchy-nix gl` asks `eglinfo` what the platform your apps will actually
+use can give, and when that is below OpenGL 3.2 core it records
+`LIBGL_ALWAYS_SOFTWARE=1` in `~/.local/state/omarchy-nix/gl-env` for
+`omarchy-nix exec` to apply. On a real GPU the answer goes the other way and
+nothing is overridden. Re-probe after a driver change with
+`omarchy-nix gl --probe`; override the verdict with `NIX_APPS_GL_SOFTWARE=1`
+(or `0`) in the config.
+
 **Desktop entries are mirrored, not just exposed.** Two problems, one answer.
 The launcher watches the applications directories that existed when it
 started; `~/.nix-profile/share/applications` is a symlink into the store, and
@@ -221,6 +236,7 @@ NIX_APPS_ALLOW_UNFREE=1           # 0 refuses VS Code, Obsidian, Sublime, Brave
 # NIX_APPS_CATALOG="$HOME/.config/omarchy-nix/apps.json"   # your own catalogue
 # NIX_APPS_INDEX_MAX_AGE=604800   # how stale the package list may get, seconds
 # NIX_APPS_UPDATE_MAX_AGE=21600   # how stale the update check may get, seconds
+# NIX_APPS_GL_SOFTWARE=1          # force software rendering (0 forces hardware)
 ```
 
 ## Troubleshooting
@@ -243,6 +259,10 @@ question in the terminal, and is what the widget reads.
 **A Nix app dies at startup with an EGL error.** It has no graphics driver:
 `omarchy-nix gl`, then launch it again. `omarchy-nix doctor` reports whether
 the driver is in place.
+
+**A Nix app opens a black window.** It has a driver but no usable GL context —
+`omarchy-nix gl --probe` re-checks, and falls back to software rendering when
+the hardware path cannot give a 3.2 core context.
 
 **An app installed but does not show in the launcher.** `omarchy-nix sync`
 re-mirrors the entries; `omarchy-nix doctor` says how many are mirrored. If it

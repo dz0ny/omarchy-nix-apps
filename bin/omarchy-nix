@@ -26,6 +26,7 @@ INDEX_FILE="$STATE_DIR/nixpkgs-index.tsv"
 # The graphics driver lives in its own profile: a gcroot that never shows up
 # among the apps you installed.
 GL_PROFILE="$STATE_DIR/gl"
+GL_ENV_FILE="$STATE_DIR/gl-env"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 UPDATES_FILE="$STATE_DIR/updates.json"
 # How stale the update check may get before the next --brief recomputes it.
@@ -261,32 +262,102 @@ gl_vendor_json() { printf '%s\n' "$GL_PROFILE/share/glvnd/egl_vendor.d/50_mesa.j
 
 gl_ready() { [[ -r $(gl_vendor_json) ]]; }
 
+gl_complete() { gl_ready && [[ -x $GL_PROFILE/bin/eglinfo ]]; }
+
 ensure_gl() {
-  gl_ready && return 0
+  gl_complete && return 0
   require_nix
   info "Installing a nixpkgs mesa for Nix apps to render with"
   mkdir -p "$STATE_DIR"
+  # mesa-demos rides along for eglinfo, which is how gl_probe below finds out
+  # what this machine can actually give a GTK app.
+  #
+  # One package at a time, and failures ignored: adding one the profile
+  # already holds is an error, and that is exactly the case on a repair run.
   # `add` is the current spelling; `install` is its deprecated alias, kept for
   # a nix older than the one setup installs.
-  nixrun profile add --profile "$GL_PROFILE" "$FLAKE#mesa" >/dev/null 2>&1 ||
-    nixrun profile install --profile "$GL_PROFILE" "$FLAKE#mesa" >/dev/null 2>&1 || true
+  local pkg
+  for pkg in mesa mesa-demos; do
+    nixrun profile add --profile "$GL_PROFILE" "$FLAKE#$pkg" >/dev/null 2>&1 ||
+      nixrun profile install --profile "$GL_PROFILE" "$FLAKE#$pkg" >/dev/null 2>&1 || true
+  done
   if gl_ready; then
     ok "Graphics driver: $GL_PROFILE"
+    gl_probe
   else
     bad "could not install mesa from $FLAKE — GUI apps may not start"
     return 1
   fi
 }
 
+# Hardware or software, decided once and remembered.
+#
+# A driver can answer eglInitialize and still be useless to a GTK app: virgl
+# in a VM exposes OpenGL 2.1 on the Wayland platform and no core profile at
+# all, GTK needs a 3.2 core context, so it fails to make one and the window
+# comes up black — the app is running, it just has nothing to draw with. The
+# same machine's llvmpipe reports 4.6. So when the hardware path cannot meet
+# the bar, stop using it.
+#
+# Probed rather than assumed, because on a real GPU the answer is the other
+# way round and software rendering would be a bad trade. Written to a file
+# because asking costs a process and a round-trip to the compositor, and the
+# answer only changes when the driver does.
+gl_probe() {
+  gl_ready || return 1
+  mkdir -p "$STATE_DIR"
+
+  case "${NIX_APPS_GL_SOFTWARE:-}" in
+    1) printf '# forced by NIX_APPS_GL_SOFTWARE=1\nLIBGL_ALWAYS_SOFTWARE=1\n' >"$GL_ENV_FILE"
+       ok "Rendering: software (forced)"; return 0 ;;
+    0) printf '# forced by NIX_APPS_GL_SOFTWARE=0\n' >"$GL_ENV_FILE"
+       ok "Rendering: hardware (forced)"; return 0 ;;
+  esac
+
+  local eglinfo="$GL_PROFILE/bin/eglinfo"
+  if [[ ! -x $eglinfo ]]; then
+    printf '# no eglinfo to probe with; assuming hardware\n' >"$GL_ENV_FILE"
+    return 0
+  fi
+
+  # The platform the apps will actually use, not whichever one eglinfo lists
+  # first — they do not answer the same.
+  local platform="Wayland platform:"
+  [[ -n ${WAYLAND_DISPLAY:-} ]] || platform="X11 platform:"
+
+  local core vendor
+  vendor=$(gl_vendor_json)
+  core=$(__EGL_VENDOR_LIBRARY_FILENAMES="$vendor" LIBGL_DRIVERS_PATH="$GL_PROFILE/lib/dri" \
+    "$eglinfo" -B 2>/dev/null |
+    awk -v want="$platform" '
+      /platform:$/ { inside = (index($0, want) == 1) }
+      inside && /OpenGL core profile version:/ { sub(/^[^:]*:[[:space:]]*/, ""); print $1; exit }')
+
+  local num=0
+  [[ $core =~ ^([0-9]+)\.([0-9]+) ]] && num=$((BASH_REMATCH[1] * 10 + BASH_REMATCH[2]))
+
+  if ((num >= 32)); then
+    printf '# %s core profile %s — hardware\n' "${platform%% *}" "$core" >"$GL_ENV_FILE"
+    ok "Rendering: hardware, OpenGL $core"
+  else
+    printf '# %s offers no OpenGL 3.2 core context — software\nLIBGL_ALWAYS_SOFTWARE=1\n' \
+      "${platform%% *}" >"$GL_ENV_FILE"
+    warn "this machine's driver offers no OpenGL 3.2 core context on ${platform%% *};"
+    warn "using software rendering, or GTK apps come up black"
+  fi
+}
+
 cmd_gl() {
   case "${1:-}" in
     --refresh)
-      require_nix
+      ensure_gl || return 1
       info "Updating the graphics driver"
       nixrun profile upgrade --profile "$GL_PROFILE" --all 2>/dev/null || true
       gl_ready && ok "Graphics driver: $(readlink -f "$GL_PROFILE")"
+      gl_probe
       ;;
-    -h | --help) echo "Usage: omarchy-nix gl [--refresh]" ;;
+    --probe) gl_probe ;;
+    -h | --help) echo "Usage: omarchy-nix gl [--refresh] [--probe]" ;;
     *)
       ensure_gl || return 1
       printf '%s\n' "$(gl_env)"
@@ -314,6 +385,12 @@ cmd_exec() {
     export __EGL_VENDOR_LIBRARY_FILENAMES="$vendor"
     export LIBGL_DRIVERS_PATH="$GL_PROFILE/lib/dri"
     export LIBVA_DRIVERS_PATH="$GL_PROFILE/lib/dri"
+    # Plus whatever gl_probe decided. Read as KEY=VALUE rather than sourced:
+    # this file is ours, and it stays data.
+    local key value
+    while IFS='=' read -r key value; do
+      export "$key=$value"
+    done < <(grep -E '^[A-Z][A-Z0-9_]*=' "$GL_ENV_FILE" 2>/dev/null)
   fi
   exec "$@"
 }
@@ -1280,6 +1357,14 @@ cmd_doctor() {
   info "Graphics"
   if gl_ready; then
     ok "driver: $(readlink -f "$GL_PROFILE" 2>/dev/null)"
+    if grep -q '^LIBGL_ALWAYS_SOFTWARE=1$' "$GL_ENV_FILE" 2>/dev/null; then
+      warn "software rendering — this machine's driver offers no OpenGL 3.2"
+      warn "core context, and GTK apps come up black without it"
+    elif [[ -r $GL_ENV_FILE ]]; then
+      ok "$(sed -n 's/^# //p' "$GL_ENV_FILE" | head -1)"
+    else
+      warn "renderer not probed yet — run: omarchy-nix gl --probe"
+    fi
   else
     warn "no driver yet — nixpkgs GUI apps will fail with \"No provider of"
     warn "eglGetPlatformDisplayEXT found\". Fix with: omarchy-nix gl"
@@ -1334,7 +1419,7 @@ ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectu
   ${C_BOLD}list${C_RESET} [--json]             What is installed in the Nix profile
   ${C_BOLD}update${C_RESET} [app...]           Upgrade everything, or just these
   ${C_BOLD}exec${C_RESET} <command> [args]     Run a Nix app with the graphics driver wired up
-  ${C_BOLD}gl${C_RESET} [--refresh]            Install or update that driver (a nixpkgs mesa)
+  ${C_BOLD}gl${C_RESET} [--refresh|--probe]   Install or update that driver, or re-probe the renderer
   ${C_BOLD}search${C_RESET} <query>            Search nixpkgs
   ${C_BOLD}catalog${C_RESET} [--json]          Show the curated app catalogue
   ${C_BOLD}verify${C_RESET}                    Check every catalogue entry against $SYSTEM and cache it
