@@ -17,6 +17,13 @@ On `aarch64` Arch Linux ARM the repos are thin and most of the AUR is
 browsers, GIMP, Blender, LibreOffice, KiCad. nixpkgs builds those for
 `aarch64-linux`, and `cache.nixos.org` ships them prebuilt.
 
+Nothing here is aarch64-specific. The system is read from `uname` once, and the
+package list, the platform check, the catalogue markers and the
+known-impossible list are all answered for *that* system — `x86_64-linux`,
+`riscv64-linux` or anything else nixpkgs supports. aarch64 is simply where the
+gap is worst; on x86_64 the same tool works and you will just reach for it less
+often.
+
 | Layer | Owner |
 |---|---|
 | kernel, drivers, Hyprland, terminal, CLI tooling, anything a service depends on | **pacman** (`omarchy pkg add`) |
@@ -97,9 +104,10 @@ and filtered to what you can actually install here:
 - only top-level attributes; `python3Packages.*` and friends are libraries, not
   apps
 
-That is ~22k packages out of the ~112k `nix search` returns, and the eval takes
-about fifteen seconds. `omarchy-nix search` still goes straight to `nix search`,
-so nothing is out of reach.
+That is ~22k packages on `aarch64-linux` and ~23k on `x86_64-linux`, out of the
+~112k `nix search` returns, and the eval takes about fifteen seconds.
+`omarchy-nix search` still goes straight to `nix search`, so nothing is out of
+reach.
 
 ### The commands
 
@@ -228,7 +236,7 @@ omarchy-nix verify
 
 resolves every entry against the configured flake in one evaluation and caches
 the result in `~/.local/state/omarchy-nix/verified.json`. The catalogue picker
-then marks each row `installed`, `no aarch64-linux build`, `renamed upstream` or
+then marks each row `installed`, `no <system> build`, `renamed upstream` or
 `attr gone`. Run it after a big nixpkgs bump.
 
 Those last two are different things, and telling them apart matters. When
@@ -251,10 +259,15 @@ does throw, `verify` and `install` print what it said.
 
 `apps.json` also carries an `unavailable` list — Spotify, Slack, Discord, Zoom,
 Signal Desktop, Android Studio, Postman, LM Studio. These ship `x86_64`-only
-Linux binaries upstream, so nixpkgs has no `aarch64-linux` build either and no
+Linux binaries upstream, so nixpkgs has no build for anything else either and no
 package manager will fix that. `omarchy-nix catalog` prints them with the
 suggested alternative (a web app via `omarchy install webapp`, `spotify-player`,
 Bruno, Ollama…), and so does the picker's preview pane.
+
+That list is scoped by `unavailable.systems`, because it is not a property of
+the app but of the app *on this machine*: on `x86_64-linux` every one of them
+installs fine, so the list applies to nothing, `catalog` does not print the
+section, and `install spotify` just installs Spotify.
 
 ## Configuration
 

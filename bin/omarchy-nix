@@ -1,10 +1,15 @@
 #!/bin/bash
 # omarchy-nix — install big desktop apps from nixpkgs on Omarchy.
 #
-# Arch (and the AUR) carry a lot less for aarch64 than for x86_64, and the gap
-# is worst exactly where it hurts: large GUI applications. nixpkgs builds those
-# for aarch64-linux and cache.nixos.org has them prebuilt, so this pulls them
-# into a per-user Nix profile and leaves the base system to pacman.
+# Arch (and the AUR) carry a lot less for anything that is not x86_64, and the
+# gap is worst exactly where it hurts: large GUI applications. nixpkgs builds
+# those for every system it supports and cache.nixos.org has them prebuilt, so
+# this pulls them into a per-user Nix profile and leaves the base system to
+# pacman.
+#
+# Nothing here is aarch64-specific. The system is read from uname once, and the
+# catalogue, the package list, the platform check and the known-impossible list
+# are all answered for that system.
 #
 # Part of the dz0ny.nix-apps Omarchy plugin.
 
@@ -37,9 +42,14 @@ FLAKE="${NIX_APPS_FLAKE:-nixpkgs}"
 ALLOW_UNFREE="${NIX_APPS_ALLOW_UNFREE:-1}"
 INSTALLER_URL="${NIX_APPS_INSTALLER_URL:-https://install.determinate.systems/nix}"
 
+# uname and nixpkgs mostly agree on machine names; the ones below are where
+# they do not. Anything else falls through as <machine>-linux, which is right
+# for i686, armv7l, riscv64 and friends.
 case "$(uname -m)" in
   aarch64 | arm64) SYSTEM="aarch64-linux" ;;
   x86_64 | amd64) SYSTEM="x86_64-linux" ;;
+  ppc64le) SYSTEM="powerpc64le-linux" ;;
+  ppc64) SYSTEM="powerpc64-linux" ;;
   *) SYSTEM="$(uname -m)-linux" ;;
 esac
 
@@ -148,7 +158,17 @@ in_catalog() {
       ) ] | length > 0' "$CATALOG" >/dev/null 2>&1
 }
 
+# The known-impossible list is not a property of the app, it is a property of
+# the app *on this machine*: Spotify and Slack are perfectly installable on
+# x86_64. `.unavailable.systems` says where the list applies, and on anything
+# else it says nothing at all.
+unavailable_here() {
+  jq -e --arg s "$SYSTEM" '
+    (.unavailable.systems // ["aarch64-linux"]) | index($s) != null' "$CATALOG" >/dev/null 2>&1
+}
+
 unavailable_note() {
+  unavailable_here || return 0
   jq -r --arg q "$1" '
     [ .unavailable.entries[]? | select((.name | ascii_downcase) | startswith($q | ascii_downcase)) ][0]
     | select(. != null)
@@ -697,7 +717,7 @@ cmd_install() {
           continue
           ;;
         unsupported)
-          bad "$attr does not list $SYSTEM in meta.platforms; upstream is likely x86_64-only"
+          bad "$attr does not list $SYSTEM in meta.platforms — no build for this machine"
           [[ -n $note ]] && warn "$note"
           warn "Install anyway with: omarchy-nix install --no-check $id"
           continue
@@ -1081,10 +1101,10 @@ cmd_updates() {
 # on this machine":
 #
 #   - only attributes whose meta.platforms covers $SYSTEM, and that are not
-#     marked broken. `nix search` happily lists Spotify and Slack on aarch64
+#     marked broken. On aarch64 `nix search` happily lists Spotify and Slack
 #     even though upstream ships x86_64 binaries only; those belong in the
 #     catalogue's `unavailable` list, not in a picker that offers to install
-#     them.
+#     them. On x86_64 the same filter simply lets more through.
 #   - only top-level attributes. python3Packages.* and friends are libraries,
 #     not apps, and dropping them takes the list from ~112k rows to ~22k.
 #
@@ -1398,6 +1418,7 @@ cmd_doctor() {
   printf '    %s (%s)\n' "$(uname -m)" "$SYSTEM"
   if [[ $SYSTEM == x86_64-linux ]]; then
     warn "on x86_64 the Arch repos and the AUR cover most of this catalogue — prefer omarchy pkg add"
+    warn "everything here still works; it is just needed less often"
   fi
 
   info "Nix"
@@ -1507,8 +1528,9 @@ cmd_catalog() {
   fi
   jq -r '.apps[] | [.category, .name, .id, .attr] | @tsv' "$CATALOG" |
     sort | awk -F'\t' '{ if ($1 != last) { print ""; print "  " toupper($1); last = $1 } printf "    %-26s %-16s %s\n", $2, $3, $4 }'
+  unavailable_here || return 0
   echo
-  echo "  NOT AVAILABLE FOR ARM (upstream ships x86_64 only)"
+  echo "  NOT AVAILABLE ON $SYSTEM (upstream ships x86_64 only)"
   jq -r '.unavailable.entries[]? | "    \(.name) — \(.why); try: \(.instead)"' "$CATALOG"
 }
 

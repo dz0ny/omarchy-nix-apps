@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "dz0ny",
   "license": "MIT",
-  "description": "Install big desktop apps from nixpkgs with Determinate Nix, for architectures (aarch64) where Arch has no package.",
+  "description": "Install big desktop apps from nixpkgs with Determinate Nix, for whatever architecture this machine is, where Arch has no package.",
   "kinds": [
     "bar-widget"
   ],

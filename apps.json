@@ -68,14 +68,15 @@
     { "id": "ollama",            "name": "Ollama",               "attr": "ollama",                     "category": "AI",            "arch": "ollama" }
   ],
   "unavailable": {
-    "comment": "Apps people ask for that ship x86_64-only upstream binaries, so nixpkgs has no aarch64-linux build either. Listed so the picker can explain instead of failing.",
+    "comment": "Apps people ask for that ship x86_64-only upstream binaries, so nixpkgs has no build for the systems in `systems` either. Listed so the picker can explain instead of failing. On a system not listed here these apps are fine, and nothing below applies.",
+    "systems": ["aarch64-linux", "armv7l-linux", "riscv64-linux", "powerpc64le-linux"],
     "entries": [
       { "name": "Spotify",        "why": "upstream ships x86_64 Linux only",  "instead": "spotify-player, or the Spotify web app" },
       { "name": "Slack",          "why": "upstream ships x86_64 Linux only",  "instead": "web app (omarchy install webapp)" },
       { "name": "Discord",        "why": "upstream ships x86_64 Linux only",  "instead": "vesktop / web app" },
       { "name": "Zoom",           "why": "upstream ships x86_64 Linux only",  "instead": "web client" },
       { "name": "Signal Desktop", "why": "upstream ships x86_64 Linux only",  "instead": "Signal on phone + web-less; or flatpak arm builds (unofficial)" },
-      { "name": "Android Studio", "why": "Google ships no Linux arm64 build", "instead": "IntelliJ IDEA CE + Android plugin" },
+      { "name": "Android Studio", "why": "Google ships no Linux arm64 build", "instead": "IntelliJ IDEA (jetbrains.idea-oss) + Android plugin" },
       { "name": "Postman",        "why": "upstream ships x86_64 Linux only",  "instead": "Bruno or Insomnia" },
       { "name": "LM Studio",      "why": "upstream ships x86_64 Linux only",  "instead": "Ollama" }
     ]
