@@ -58,6 +58,9 @@ warn() { printf '%s\n' "${C_YELLOW}  !${C_RESET} $*" >&2; }
 bad() { printf '%s\n' "${C_RED}  ✗${C_RESET} $*" >&2; }
 die() { printf '%s\n' "${C_RED}omarchy-nix:${C_RESET} $*" >&2; exit 1; }
 notify() { command -v omarchy-notification-send >/dev/null 2>&1 && omarchy-notification-send "$@" >/dev/null 2>&1 || true; }
+# Nudge the bar widget to re-read the cache, so it disappears the moment the
+# last update is taken rather than at the next poll an hour later.
+notify_widget() { command -v omarchy-shell >/dev/null 2>&1 && omarchy-shell -q dz0ny.nix-apps refresh >/dev/null 2>&1 || true; }
 interactive() { [[ -t 0 && -t 1 ]]; }
 
 # nf-md-nix, spelled out so the glyph survives any editor or transport.
@@ -799,7 +802,24 @@ cmd_update() {
       selector=$(installed_attr "$attr") && selectors+=("$selector")
     done
     ((${#selectors[@]})) || die "none of those are installed"
-    nixrun profile upgrade "${selectors[@]}"
+
+    # `nix profile upgrade` follows the flake ref each element was installed
+    # from, while `updates` measures against the configured one. Normally
+    # those are the same. When they are not — someone changed
+    # NIX_APPS_FLAKE, or installed by hand from a pin — the upgrade is a
+    # no-op and the app stays listed as outdated forever. Say so, rather
+    # than let it look like the upgrade silently failed.
+    local sel url
+    for sel in "${selectors[@]}"; do
+      url=$(profile_rows | awk -F'\t' -v n="$sel" '$1 == n { print $3; exit }')
+      [[ -z $url || $url == "$FLAKE" || $url == "flake:$FLAKE" ]] && continue
+      warn "$sel was installed from $url, not $FLAKE — an upgrade follows the"
+      warn "flake it came from. To move it: omarchy-nix remove $sel && omarchy-nix install $sel"
+    done
+
+    # Same flags as the --all branch below: without them an unfree app
+    # refuses to upgrade, which is a confusing way to fail on VS Code.
+    NIXPKGS_ALLOW_UNFREE=1 nixrun profile upgrade --impure "${selectors[@]}"
   else
     info "Upgrading every app in the Nix profile"
     NIXPKGS_ALLOW_UNFREE=1 nixrun profile upgrade --impure --all
@@ -1001,7 +1021,7 @@ cmd_updates() {
     return 0
   fi
 
-  info "$count update(s) available — run: omarchy-nix update"
+  info "$count update(s) available — run: omarchy-nix menu update"
   jq -r '.outdated[] | "  \(.name)  (\(.attr))"' "$UPDATES_FILE"
 }
 
@@ -1238,6 +1258,45 @@ cmd_menu() {
   fi
   require_nix
 
+  if [[ $mode == update ]]; then
+    # Ask nixpkgs rather than trusting the cache: the bar widget is what
+    # usually opens this, and the answer it is showing may be hours old.
+    cmd_updates --refresh >/dev/null 2>&1 || true
+    local count
+    count=$(jq -r '.count // 0' "$UPDATES_FILE" 2>/dev/null || echo 0)
+    if ((count == 0)); then
+      ok "Every Nix app is up to date"
+      notify_widget
+      return 0
+    fi
+
+    # Version comes from the package list when it has one; it is the single
+    # most useful thing to see next to "this would change".
+    local rows selection attrs=()
+    rows=$(jq -r '.outdated[] | [.name, .attr] | @tsv' "$UPDATES_FILE" |
+      while IFS=$'\t' read -r uname uattr; do
+        printf '%-28s %-24s %s\n' "$uattr" "$uname" \
+          "$(awk -F'\t' -v a="$uattr" '$1 == a { print $2; exit }' "$INDEX_FILE" 2>/dev/null)"
+      done)
+    [[ -n $rows ]] || { ok "Every Nix app is up to date"; return 0; }
+
+    selection=$(printf '%s\n' "$rows" |
+      fzf_pick "$count Nix app update(s) — space to select, enter to upgrade" "" \
+        --prompt "Update > " --bind 'space:toggle' --bind 'ctrl-a:select-all') || return 0
+    [[ -n $selection ]] || return 0
+
+    while read -r line; do
+      [[ -z $line ]] && continue
+      attrs+=("$(awk '{print $1}' <<<"$line")")
+    done <<<"$selection"
+
+    cmd_update "${attrs[@]}"
+    local rc=$?
+    cmd_updates --refresh >/dev/null 2>&1 || true
+    notify_widget
+    return $rc
+  fi
+
   if [[ $mode == remove ]]; then
     local rows selection names=()
     rows=$(profile_rows_detailed | awk -F'\t' '{ n = $2; sub(/.*\./, "", n); printf "%-30s %s\n", $1, n }')
@@ -1410,7 +1469,7 @@ usage() {
 ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectures Arch does not cover
 
   ${C_BOLD}setup${C_RESET} [--env-only]        Install Determinate Nix and wire it into the session
-  ${C_BOLD}menu${C_RESET} [remove]             Pick from the curated catalogue (or remove); alt-a for every package
+  ${C_BOLD}menu${C_RESET} [remove|update]      Pick from the curated catalogue (or remove, or upgrade)
   ${C_BOLD}pick${C_RESET} [query]              Pick straight from every package that builds for $SYSTEM
   ${C_BOLD}install${C_RESET} <app|attr>...     Install by catalogue id, name, or nixpkgs attribute
       --force                 install even when a native Arch package exists

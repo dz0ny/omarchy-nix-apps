@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Nix Apps",
-    "description": "Appears only when installed Nix apps have newer builds waiting. Click to upgrade, middle-click to re-check, right-click for the list.",
+    "description": "Appears only when installed Nix apps have newer builds waiting. Click to pick what to upgrade, middle-click to re-check, right-click for the list.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",

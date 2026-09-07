@@ -11,7 +11,7 @@
   "install.nix.package": {"icon":"","label":"Any Package","description":"Every nixpkgs package that builds for this machine, like Install > Package","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix pick'"},
   "install.nix.index": {"icon":"","label":"Rebuild Index","description":"Refresh the list of nixpkgs packages that build for this machine","when":"command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix index --refresh'"},
   "remove.nix": {"icon":"󱄅","label":"Nix App","description":"Remove an app from the Nix profile","when":"command -v omarchy-nix >/dev/null 2>&1","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu remove'"},
-  "update.nix": {"icon":"󱄅","label":"Nix Apps","description":"Upgrade every app in the Nix profile","when":"command -v omarchy-nix >/dev/null 2>&1 && (command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ])","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix update'"},
+  "update.nix": {"icon":"󱄅","label":"Nix Apps","description":"Pick which apps in the Nix profile to upgrade","when":"command -v omarchy-nix >/dev/null 2>&1 && (command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ])","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu update'"},
   "setup.nix": {"icon":"󱄅","label":"Nix","description":"Install Determinate Nix","when":"command -v omarchy-nix >/dev/null 2>&1 && ! command -v nix >/dev/null 2>&1 && [ ! -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix setup'"},
   // <<< omarchy-nix-apps
 }

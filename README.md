@@ -57,14 +57,18 @@ Log out and back in once after `setup`, so the session picks up
 
 The bar widget is an alert, not a launcher: the bar stays empty until an
 installed Nix app actually has a newer build waiting, and goes back to empty
-once you have taken it. Left-click upgrades everything, middle-click re-checks
-now, right-click lists what is waiting.
+once you have taken it. Left-click opens the update picker — **space** to
+select, **enter** to upgrade — middle-click re-checks now, right-click lists
+what is waiting. It opens a picker rather than upgrading everything on the
+spot: an update you did not ask for is how a working machine stops working
+mid-afternoon.
 
 ## Usage
 
 ```
 omarchy-nix setup [--env-only]   Install Determinate Nix and wire the session
 omarchy-nix menu [remove]        Curated catalogue picker; alt-a for every package
+omarchy-nix menu update          Pick which pending updates to take
 omarchy-nix pick [query]         Picker over every package that builds here
 omarchy-nix install <app>...     By catalogue id, name, or raw nixpkgs attribute
 omarchy-nix remove <app>...
@@ -114,6 +118,18 @@ straight to `nix search`, so nothing is out of reach.
 
 `omarchy-nix pick` opens that same list directly, skipping the catalogue —
 it is the Nix counterpart to `Install → Package`.
+
+`omarchy-nix menu update` is the third picker: it re-checks against nixpkgs,
+lists only the apps whose build has actually moved, and upgrades the ones you
+mark. **Space** selects, **enter** upgrades, `ctrl-a` takes everything. This is
+what the bar widget opens, and what `Update → Nix Apps` runs.
+
+An app installed from a different flake than the configured one — you changed
+`NIX_APPS_FLAKE`, or installed by hand from a pin — is a case worth knowing
+about: `nix profile upgrade` follows the ref each element came from, so such an
+app stays listed as outdated no matter how often you upgrade it. `omarchy-nix
+update` says so, and the way out is `omarchy-nix remove <app> && omarchy-nix
+install <app>`.
 
 ## How it works
 

@@ -70,7 +70,7 @@ BLOCK=$(cat <<EOF
   "install.nix.package": {"icon":"$ICON_SEARCH","label":"Any Package","description":"Every nixpkgs package that builds for this machine, like Install > Package","action":"$TERM_RUN 'omarchy-nix pick'"},
   "install.nix.index": {"icon":"$ICON_REFRESH","label":"Rebuild Index","description":"Refresh the list of nixpkgs packages that build for this machine","when":"$HAVE_NIX","action":"$TERM_RUN 'omarchy-nix index --refresh'"},
   "remove.nix": {"icon":"$GLYPH","label":"Nix App","description":"Remove an app from the Nix profile","when":"$HAVE_CLI","action":"$TERM_RUN 'omarchy-nix menu remove'"},
-  "update.nix": {"icon":"$GLYPH","label":"Nix Apps","description":"Upgrade every app in the Nix profile","when":"$HAVE_CLI && ($HAVE_NIX)","action":"$TERM_RUN 'omarchy-nix update'"},
+  "update.nix": {"icon":"$GLYPH","label":"Nix Apps","description":"Pick which apps in the Nix profile to upgrade","when":"$HAVE_CLI && ($HAVE_NIX)","action":"$TERM_RUN 'omarchy-nix menu update'"},
   "setup.nix": {"icon":"$GLYPH","label":"Nix","description":"Install Determinate Nix","when":"$HAVE_CLI && $NO_NIX","action":"$TERM_RUN 'omarchy-nix setup'"},
   // <<< omarchy-nix-apps
 EOF

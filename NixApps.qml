@@ -39,8 +39,10 @@ BarWidget {
     if (!recheckProc.running) recheckProc.running = true
   }
 
+  // Opens the picker rather than upgrading everything: an update you did not
+  // ask for is how a working machine stops working mid-afternoon.
   function runUpdate() {
-    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation 'omarchy-nix update'")
+    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu update'")
   }
 
   function showStatus() {
@@ -133,8 +135,8 @@ BarWidget {
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     tooltipText: root.updateCount === 1
-      ? "1 Nix app update — click to upgrade"
-      : root.updateCount + " Nix app updates — click to upgrade"
+      ? "1 Nix app update — click to pick what to upgrade"
+      : root.updateCount + " Nix app updates — click to pick what to upgrade"
 
     onPressed: function (b) {
       if (b === Qt.RightButton) root.showStatus()
