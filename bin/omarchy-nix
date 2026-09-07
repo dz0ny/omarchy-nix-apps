@@ -125,6 +125,15 @@ resolve_app() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$attr" "$attr" "$attr" "false" "" ""
 }
 
+in_catalog() {
+  jq -e --arg q "$1" '
+    [ .apps[] | select(
+        .id == $q
+        or .attr == $q
+        or ((.name | ascii_downcase) == ($q | ascii_downcase))
+      ) ] | length > 0' "$CATALOG" >/dev/null 2>&1
+}
+
 unavailable_note() {
   jq -r --arg q "$1" '
     [ .unavailable.entries[]? | select((.name | ascii_downcase) | startswith($q | ascii_downcase)) ][0]
@@ -349,12 +358,20 @@ cmd_install() {
 
   require_nix
 
-  local refs=() labels=() target row id name attr unfree arch note state selector
+  local refs=() labels=() target row id name attr unfree arch note state selector hint
   for target in "${targets[@]}"; do
-    if ! row=$(resolve_app "$target"); then
-      local hint
+    # Ask about the known-impossible list before falling back to treating the
+    # argument as a bare attribute, so "spotify" explains itself instead of
+    # failing later with a nixpkgs evaluation error.
+    if ((!force)) && ! in_catalog "$target"; then
       hint=$(unavailable_note "$target")
-      [[ -n $hint ]] && warn "$hint"
+      if [[ -n $hint ]]; then
+        warn "$hint"
+        continue
+      fi
+    fi
+
+    if ! row=$(resolve_app "$target"); then
       bad "unknown app: $target"
       continue
     fi
@@ -465,9 +482,9 @@ cmd_list() {
     [[ -z $name ]] && continue
     attr="${path##*.}"
     pretty=$(jq -r --arg a "$attr" '[.apps[] | select(.attr == $a or (.attr | endswith("." + $a)))][0].name // ""' "$CATALOG" 2>/dev/null)
-    printf '%s%-24s%s %s%s%s %s%s%s\n' \
+    printf '%s%-22s%s %-26s %s%s%s\n' \
       "$C_BOLD" "$name" "$C_RESET" \
-      "" "${pretty:-$attr}" "" \
+      "${pretty:-$attr}" \
       "$C_DIM" "${url:-$FLAKE}#$attr" "$C_RESET"
     ((count++))
   done < <(profile_rows)
@@ -625,8 +642,8 @@ cmd_menu() {
 
   if [[ $mode == remove ]]; then
     local rows selection
-    rows=$(cmd_list | sed 's/\x1b\[[0-9;]*m//g')
-    [[ -n $rows ]] || die "nothing installed"
+    rows=$(profile_rows | awk -F'\t' '{ n = $2; sub(/.*\./, "", n); printf "%-22s %s\n", $1, n }')
+    [[ -n $rows ]] || die "nothing installed in the Nix profile"
     selection=$(printf '%s\n' "$rows" | gum choose --no-limit --height 20 \
       --header "Remove which Nix apps? (space to pick, enter to confirm)") || return 0
     [[ -n $selection ]] || return 0
