@@ -230,8 +230,24 @@ omarchy-nix verify
 
 resolves every entry against the configured flake in one evaluation and caches
 the result in `~/.local/state/omarchy-nix/verified.json`. The catalogue picker
-then marks each row `installed`, `no aarch64-linux build`, or `attr gone`. Run
-it after a big nixpkgs bump.
+then marks each row `installed`, `no aarch64-linux build`, `renamed upstream`
+or `attr gone`. Run it after a big nixpkgs bump.
+
+Those last two are different things, and telling them apart matters. When
+nixpkgs renames or discontinues a package it usually leaves the attribute in
+place and makes it *throw*, with the answer in the message:
+
+```
+jetbrains.idea-community: IntelliJ IDEA Community has been removed as it has
+been discontinued by JetBrains. Either switch to 'jetbrains.idea-oss' or
+'jetbrains.idea'.
+```
+
+Testing that with `tryEval` alone cannot distinguish "deleted" from "still
+there and refusing", and calling it "attr gone" sends you looking for a
+package sitting right in front of you. So existence is checked with `hasAttr`,
+which does not force the value, before anything is evaluated — and when an
+attribute does throw, `verify` and `install` print what it said.
 
 ### Apps that cannot work here
 

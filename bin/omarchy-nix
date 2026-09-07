@@ -170,31 +170,69 @@ nix_expr_pkgs() {
     "$FLAKE" "$SYSTEM" "$([[ $ALLOW_UNFREE == 1 ]] && echo true || echo false)"
 }
 
-# Prints "ok", "unsupported" or "missing" for one attribute path.
+# Classifies one attribute path, as a Nix function named `check`.
+#
+# The obvious version — tryEval the value, call a failure "missing" — cannot
+# tell an attribute that was deleted from one that is still there and throws.
+# nixpkgs uses the second for a rename or a discontinuation, and the throw
+# carries the answer:
+#
+#   jetbrains.idea-community: IntelliJ IDEA Community has been removed as it
+#   has been discontinued by JetBrains. Either switch to 'jetbrains.idea-oss'
+#   or 'jetbrains.idea'.
+#
+# Reporting that as "attr gone from nixpkgs" sends you looking for a package
+# that is sitting right there. So existence is tested with hasAttr, which
+# does not force the value, before anything is evaluated.
+nix_expr_check() {
+  cat <<'NIXEOF'
+      exists = path:
+        let
+          go = attrs: ps:
+            if !(builtins.isAttrs attrs) then false
+            else let h = builtins.head ps; t = builtins.tail ps;
+              in if !(builtins.hasAttr h attrs) then false
+                 else if t == [] then true
+                 else let probe = builtins.tryEval attrs.${h};
+                   in probe.success && go probe.value t;
+        in go pkgs (lib.splitString "." path);
+      check = path:
+        if !(exists path) then "missing"
+        else let probe = builtins.tryEval (lib.attrByPath (lib.splitString "." path) null pkgs);
+          in if !probe.success then "error"
+             else if probe.value == null then "missing"
+             else if builtins.elem SYSTEM (probe.value.meta.platforms or []) then "ok"
+             else "unsupported";
+NIXEOF
+}
+
+# Prints "ok", "unsupported", "error", "missing" or "unknown" for one
+# attribute path. "error" means it is there but will not evaluate here;
+# attr_error prints what nixpkgs said about that.
 attr_state() {
   local attr="$1" out
   valid_attr "$attr" || { echo "missing"; return; }
-  out=$(nixrun eval --impure --json --expr "
+  out=$(nixrun eval --impure --raw --expr "
     let
       pkgs = $(nix_expr_pkgs);
       lib = pkgs.lib;
-      probe = builtins.tryEval (lib.attrByPath (lib.splitString \".\" \"$attr\") null pkgs);
-    in
-      if !probe.success || probe.value == null then null
-      else (probe.value.meta.platforms or [])
+      SYSTEM = \"$SYSTEM\";
+$(nix_expr_check)
+    in check \"$attr\"
   " 2>/dev/null)
+  printf '%s\n' "${out:-unknown}"
+}
 
-  case "$out" in
-    "" ) echo "unknown" ;;
-    "null" ) echo "missing" ;;
-    * )
-      if jq -e --arg s "$SYSTEM" 'index($s) != null' <<<"$out" >/dev/null 2>&1; then
-        echo "ok"
-      else
-        echo "unsupported"
-      fi
-      ;;
-  esac
+# nixpkgs puts the answer in the throw — a rename, a discontinuation, the
+# attribute to use instead — so when an attribute refuses to evaluate, ask it
+# again without tryEval and keep what it said.
+attr_error() {
+  local attr="$1"
+  nixrun eval --impure --raw --expr "
+    let pkgs = $(nix_expr_pkgs);
+    in toString (pkgs.lib.attrByPath (pkgs.lib.splitString \".\" \"$attr\") null pkgs).name
+  " 2>&1 >/dev/null |
+    sed -n 's/^[[:space:]]*error:[[:space:]]*//p' | grep -v '^$' | tail -1
 }
 
 # --------------------------------------------------------------- profile
@@ -651,6 +689,13 @@ cmd_install() {
           bad "$attr does not exist in $FLAKE — search with: omarchy-nix search ${name%% *}"
           continue
           ;;
+        error)
+          # nixpkgs threw, and the throw is usually the answer: it names the
+          # attribute that replaced this one.
+          bad "$attr is in $FLAKE but refuses to evaluate:"
+          warn "$(attr_error "$attr")"
+          continue
+          ;;
         unsupported)
           bad "$attr does not list $SYSTEM in meta.platforms; upstream is likely x86_64-only"
           [[ -n $note ]] && warn "$note"
@@ -857,11 +902,8 @@ cmd_verify() {
     let
       pkgs = $(nix_expr_pkgs);
       lib = pkgs.lib;
-      check = path:
-        let probe = builtins.tryEval (lib.attrByPath (lib.splitString \".\" path) null pkgs);
-        in if !probe.success || probe.value == null then \"missing\"
-           else if builtins.elem \"$SYSTEM\" (probe.value.meta.platforms or []) then \"ok\"
-           else \"unsupported\";
+      SYSTEM = \"$SYSTEM\";
+$(nix_expr_check)
     in builtins.listToAttrs (map (p: { name = p; value = check p; }) [ $attrs ])
   "
 
@@ -880,6 +922,10 @@ cmd_verify() {
       case "$state" in
         ok) ok "$name ${C_DIM}($attr)${C_RESET}" ;;
         unsupported) warn "$name — no $SYSTEM build ${C_DIM}($attr)${C_RESET}" ;;
+        error)
+          bad "$name — will not evaluate ${C_DIM}($attr)${C_RESET}"
+          printf '      %s%s%s\n' "$C_DIM" "$(attr_error "$attr")" "$C_RESET"
+          ;;
         missing) bad "$name — attr gone from nixpkgs ${C_DIM}($attr)${C_RESET}" ;;
       esac
     done
@@ -1146,6 +1192,7 @@ cmd_info() {
     case "$state" in
       ok) printf '  platform     builds for %s\n' "$SYSTEM" ;;
       unsupported) printf '  platform     %sno %s build%s\n' "$C_YELLOW" "$SYSTEM" "$C_RESET" ;;
+      error) printf '  platform     %srenamed or removed upstream — omarchy-nix verify says how%s\n' "$C_RED" "$C_RESET" ;;
       missing) printf '  platform     %sattribute not in %s%s\n' "$C_RED" "$FLAKE" "$C_RESET" ;;
       *) [[ -s $INDEX_FILE ]] && printf '  platform     %snot among the %s packages that build for %s%s\n' \
         "$C_YELLOW" "$(index_count)" "$SYSTEM" "$C_RESET" ;;
@@ -1230,6 +1277,7 @@ catalog_lines() {
       state=$(verified_state "$attr" || true)
       case "$state" in
         unsupported) marker="no $SYSTEM build" ;;
+        error) marker="renamed upstream" ;;
         missing) marker="attr gone" ;;
         *) marker="" ;;
       esac
