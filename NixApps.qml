@@ -6,31 +6,37 @@ import qs.Ui
 
 // Bar widget for the dz0ny.nix-apps plugin.
 //
-// Deliberately thin: everything it knows comes from `omarchy-nix status
-// --brief`, and every action it takes is the same omarchy-nix command a user
-// would type. The widget is a shortcut, never a second implementation.
+// Modelled on omarchy.system-update: it is an alert, not a launcher. The bar
+// stays empty until an installed Nix app actually has a newer build waiting,
+// and goes back to empty once you have taken it. Installing and removing live
+// in the Omarchy menu, where the fzf pickers have room to work.
+//
+// It also carries the plugin's own wiring: on load it runs the plugin's
+// install.sh, which puts omarchy-nix on PATH and the menu entries in place.
+// That is why `omarchy plugin add ... --enable` is all a new machine needs.
 BarWidget {
   id: root
   moduleName: "dz0ny.nix-apps"
 
-  // Number of apps in the Nix profile; -1 until the first poll answers.
-  property int appCount: -1
-  // False while Nix is missing, which is also how the widget stays invisible
-  // on a machine that never ran `omarchy-nix setup`.
-  property bool nixReady: false
+  // Apps whose current nixpkgs build differs from the one in the profile.
+  property int updateCount: 0
 
-  readonly property int refreshIntervalSec: (root.settings && root.settings.refreshIntervalSec > 0)
-    ? root.settings.refreshIntervalSec
-    : 300
+  readonly property int checkIntervalSec: (root.settings && root.settings.checkIntervalSec > 0)
+    ? root.settings.checkIntervalSec
+    : 3600
 
-  readonly property bool hideWhenEmpty: root.settings ? root.settings.hideWhenEmpty === true : false
+  // file:///…/plugins/dz0ny.nix-apps/ -> /…/plugins/dz0ny.nix-apps
+  readonly property string pluginDir: String(Qt.resolvedUrl("."))
+    .replace(/^file:\/\//, "")
+    .replace(/\/$/, "")
 
   function refresh() {
-    if (!statusProc.running) statusProc.running = true
+    if (!checkProc.running) checkProc.running = true
   }
 
-  function openPicker() {
-    if (root.bar) root.bar.run("omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu'")
+  // Ignore the cache and ask nixpkgs again.
+  function recheck() {
+    if (!recheckProc.running) recheckProc.running = true
   }
 
   function runUpdate() {
@@ -38,12 +44,14 @@ BarWidget {
   }
 
   function showStatus() {
-    if (root.bar) root.bar.run("omarchy-nix status --notify")
+    if (root.bar) root.bar.run("omarchy-nix updates --notify")
   }
 
-  visible: root.nixReady && (!root.hideWhenEmpty || root.appCount > 0)
+  visible: root.updateCount > 0
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  Component.onCompleted: registerProc.running = true
 
   IpcHandler {
     target: "dz0ny.nix-apps"
@@ -52,33 +60,64 @@ BarWidget {
       root.broadcast("refresh")
     }
 
-    function install(): void {
-      root.broadcast("openPicker")
+    function check(): void {
+      root.broadcast("recheck")
     }
   }
 
+  // Self-registration. install.sh is a no-op when everything is already in
+  // place — no rewrite, no backup, no output — so running it on every shell
+  // start costs one process and nothing else.
   Process {
-    id: statusProc
-    command: ["omarchy-nix", "status", "--brief"]
+    id: registerProc
+    command: ["bash", root.pluginDir + "/install.sh", "--quiet", "--no-prompt"]
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("nix-apps/install", text.trim())
+    }
+  }
+
+  // Reads the cached answer; the CLI recomputes only when that cache has aged
+  // past its own limit, so polling here stays cheap.
+  Process {
+    id: checkProc
+    command: ["omarchy-nix", "updates", "--brief"]
 
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var raw = String(text || "").trim()
-        var parsed = parseInt(raw, 10)
-        root.appCount = isNaN(parsed) ? 0 : parsed
+        var parsed = parseInt(String(text || "").trim(), 10)
+        root.updateCount = isNaN(parsed) ? 0 : parsed
       }
     }
 
-    // A non-zero exit means "no Nix here", which is a state, not a failure.
+    // Non-zero means "nothing waiting", or no Nix at all. Both are states
+    // where this widget has nothing to say.
     onExited: function (exitCode) {
-      root.nixReady = exitCode === 0
-      if (!root.nixReady) root.appCount = -1
+      if (exitCode !== 0) root.updateCount = 0
+    }
+  }
+
+  Process {
+    id: recheckProc
+    command: ["omarchy-nix", "updates", "--refresh", "--brief"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = parseInt(String(text || "").trim(), 10)
+        root.updateCount = isNaN(parsed) ? 0 : parsed
+      }
+    }
+
+    onExited: function (exitCode) {
+      if (exitCode !== 0) root.updateCount = 0
     }
   }
 
   Timer {
-    interval: root.refreshIntervalSec * 1000
+    interval: root.checkIntervalSec * 1000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -90,17 +129,17 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     // nf-md-nix
-    text: "\udb84\udd05"
+    text: "󱄅"
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
-    tooltipText: root.appCount >= 0
-      ? root.appCount + " Nix app" + (root.appCount === 1 ? "" : "s") + " — click to install, middle-click to update"
-      : "Nix apps"
+    tooltipText: root.updateCount === 1
+      ? "1 Nix app update — click to upgrade"
+      : root.updateCount + " Nix app updates — click to upgrade"
 
     onPressed: function (b) {
       if (b === Qt.RightButton) root.showStatus()
-      else if (b === Qt.MiddleButton) root.runUpdate()
-      else root.openPicker()
+      else if (b === Qt.MiddleButton) root.recheck()
+      else root.runUpdate()
     }
   }
 }

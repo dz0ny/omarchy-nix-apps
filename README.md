@@ -22,22 +22,28 @@ Arch repos for this machine, `omarchy-nix install` refuses and tells you to run
 
 ## Requirements
 
-- Omarchy (Hyprland under `uwsm`), `jq`, `gum`, `curl` — all already present on a stock install
+- Omarchy (Hyprland under `uwsm`), `jq`, `fzf`, `gum`, `curl` — all already present on a stock install
 - ~5 GB of free space for `/nix`
 - `sudo` once, for the Nix installer
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/dz0ny/omarchy-nix-apps.git
-~/.config/omarchy/plugins/dz0ny.nix-apps/install.sh
+omarchy plugin add https://github.com/dz0ny/omarchy-nix-apps.git --enable
 ```
 
-`omarchy plugin add` only copies the folder and rescans the shell, so
-`install.sh` does the rest: it links `omarchy-nix` into `~/.local/bin` and adds
-four entries to the Omarchy menu (`Install → Nix App`, `Remove → Nix App`,
-`Update → Nix Apps`, `Setup → Nix`). Re-running it is safe; it replaces its own
-managed block rather than appending a second one.
+That is the whole install. `omarchy plugin add` only copies the folder and
+rescans the shell, so the bar widget runs `install.sh` when it loads: that
+links `omarchy-nix` into `~/.local/bin` and merges the plugin's entries into
+the Omarchy menu (`Install → Nix`, `Remove → Nix App`, `Update → Nix Apps`,
+`Setup → Nix`). It is a no-op on every run after the first — no rewrite, no
+backup, no output — so it costs one process per shell start.
+
+Without the widget, run it yourself once:
+
+```bash
+~/.config/omarchy/plugins/dz0ny.nix-apps/install.sh
+```
 
 Then:
 
@@ -49,24 +55,23 @@ omarchy-nix menu      # pick apps
 Log out and back in once after `setup`, so the session picks up
 `XDG_DATA_DIRS` and the installed apps appear in the launcher.
 
-The bar widget is optional:
-
-```bash
-omarchy plugin enable dz0ny.nix-apps --section right
-```
-
-Left-click opens the picker, middle-click upgrades everything, right-click sends
-a status notification. It hides itself entirely until Nix is installed.
+The bar widget is an alert, not a launcher: the bar stays empty until an
+installed Nix app actually has a newer build waiting, and goes back to empty
+once you have taken it. Left-click upgrades everything, middle-click re-checks
+now, right-click lists what is waiting.
 
 ## Usage
 
 ```
 omarchy-nix setup [--env-only]   Install Determinate Nix and wire the session
-omarchy-nix menu [remove]        TUI picker
+omarchy-nix menu [remove]        Curated catalogue picker; alt-a for every package
+omarchy-nix pick [query]         Picker over every package that builds here
 omarchy-nix install <app>...     By catalogue id, name, or raw nixpkgs attribute
 omarchy-nix remove <app>...
 omarchy-nix list [--json]
 omarchy-nix update [app...]
+omarchy-nix updates [--brief]    What an upgrade would change (cached)
+omarchy-nix index [--refresh]    Rebuild the list of packages that build here
 omarchy-nix search <query>
 omarchy-nix catalog [--json]
 omarchy-nix verify               Check the whole catalogue against this system
@@ -80,6 +85,32 @@ omarchy-nix install vscode blender kicad
 omarchy-nix install nixpkgs#zed-editor      # anything in nixpkgs, not just the catalogue
 omarchy-nix install --force firefox         # even though Arch has it for arm64
 ```
+
+### The picker
+
+`omarchy-nix menu` opens fzf on the ~50 curated apps, with a preview pane
+carrying the version, the description, whether it builds here, and whether
+pacman has it natively. **`alt-a` switches the same picker to every package
+that builds for this machine, and back.** `tab` multi-selects, `enter`
+installs.
+
+That second list is not all of nixpkgs. It is built once by
+`omarchy-nix index` and cached in
+`~/.local/state/omarchy-nix/nixpkgs-index.tsv`, and it is filtered to what you
+can actually install here:
+
+- only attributes whose `meta.platforms` covers this system, and that are not
+  marked broken — `nix search` will happily offer you Spotify on aarch64 even
+  though upstream ships x86_64 binaries only
+- only top-level attributes; `python3Packages.*` and friends are libraries,
+  not apps
+
+On this machine that is ~22k packages out of the ~112k `nix search` returns,
+and the eval takes about fifteen seconds. `omarchy-nix search` still goes
+straight to `nix search`, so nothing is out of reach.
+
+`omarchy-nix pick` opens that same list directly, skipping the catalogue —
+it is the Nix counterpart to `Install → Package`.
 
 ## How it works
 
@@ -124,9 +155,9 @@ omarchy-nix verify
 ```
 
 resolves every entry against the configured flake in one evaluation and caches
-the result in `~/.local/state/omarchy-nix/verified.json`. The picker then marks
-entries `✓` installed, `✗` no build for this system, `?` attribute gone. Run it
-after a big nixpkgs bump.
+the result in `~/.local/state/omarchy-nix/verified.json`. The catalogue picker
+then marks each row `installed`, `no aarch64-linux build`, or `attr gone`. Run
+it after a big nixpkgs bump.
 
 ### Apps that cannot work here
 
@@ -145,6 +176,8 @@ Bruno, Ollama…).
 NIX_APPS_FLAKE="nixpkgs"          # or github:NixOS/nixpkgs/nixos-unstable to pin
 NIX_APPS_ALLOW_UNFREE=1           # 0 refuses VS Code, Obsidian, Sublime, Brave
 # NIX_APPS_CATALOG="$HOME/.config/omarchy-nix/apps.json"   # your own catalogue
+# NIX_APPS_INDEX_MAX_AGE=604800   # how stale the package list may get, seconds
+# NIX_APPS_UPDATE_MAX_AGE=21600   # how stale the update check may get, seconds
 ```
 
 ## Troubleshooting
@@ -154,7 +187,15 @@ omarchy-nix doctor
 ```
 
 checks the architecture, the Nix binary and daemon, flake support, the session
-env file, `XDG_DATA_DIRS`, the `.desktop` count, and the required tooling.
+env file, `XDG_DATA_DIRS`, the `.desktop` count, the required tooling, and the
+age of the package list.
+
+**The bar widget never appears.** It only appears when an installed Nix app has
+a newer build waiting. `omarchy-nix updates --refresh` answers the same
+question in the terminal, and is what the widget reads.
+
+**The package list is out of date.** `omarchy-nix index --refresh`, or
+`Install → Nix → Rebuild Index`. It rebuilds itself weekly on its own.
 
 **An app installed but does not show in the launcher.** The session env only
 loads at login — log out and back in, then `omarchy-nix doctor`.

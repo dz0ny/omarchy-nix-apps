@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "dz0ny.nix-apps",
   "name": "Nix Apps",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "dz0ny",
   "license": "MIT",
   "description": "Install big desktop apps from nixpkgs with Determinate Nix, for architectures (aarch64) where Arch has no package.",
@@ -14,29 +14,22 @@
   },
   "barWidget": {
     "displayName": "Nix Apps",
-    "description": "Shows how many apps are installed in the Nix profile. Click to install, middle-click to update, right-click for status.",
+    "description": "Appears only when installed Nix apps have newer builds waiting. Click to upgrade, middle-click to re-check, right-click for the list.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshIntervalSec": 300,
-      "hideWhenEmpty": false
+      "checkIntervalSec": 3600
     },
     "schema": [
       {
-        "key": "refreshIntervalSec",
+        "key": "checkIntervalSec",
         "type": "integer",
-        "label": "Refresh interval (seconds)",
-        "min": 30,
-        "max": 3600,
-        "step": 30,
-        "defaultValue": 300
-      },
-      {
-        "key": "hideWhenEmpty",
-        "type": "boolean",
-        "label": "Hide when no Nix apps are installed",
-        "defaultValue": false
+        "label": "Check interval (seconds)",
+        "min": 300,
+        "max": 86400,
+        "step": 300,
+        "defaultValue": 3600
       }
     ]
   }

@@ -2,11 +2,16 @@
   // Menu entries contributed by the dz0ny.nix-apps plugin.
   //
   // install.sh merges these into ~/.config/omarchy/extensions/omarchy-menu.jsonc
-  // between managed markers. This copy is here so you can paste them yourself
-  // if you would rather not run the installer.
+  // between the managed markers, and rewrites them only when they differ. This
+  // copy is here so you can paste them yourself if you would rather not run it.
 
-  "install.nix": {"icon":"󱄅","label":"Nix App","description":"Install a big desktop app from nixpkgs","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu'"},
-  "remove.nix": {"icon":"󱄅","label":"Nix App","description":"Remove an app from the Nix profile","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu remove'"},
-  "update.nix": {"icon":"󱄅","label":"Nix Apps","description":"Upgrade every app in the Nix profile","when":"command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix update'"},
-  "setup.nix": {"icon":"󱄅","label":"Nix","description":"Install Determinate Nix","when":"! command -v nix >/dev/null 2>&1 && [ ! -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix setup'"},
+  // >>> omarchy-nix-apps (managed by install.sh)
+  "install.nix": {"icon":"󱄅","label":"Nix","description":"Apps from nixpkgs, for what Arch does not package here","when":"command -v omarchy-nix >/dev/null 2>&1"},
+  "install.nix.app": {"icon":"󱄅","label":"App","description":"The curated catalogue — alt-a switches to every package that builds here","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu'"},
+  "install.nix.package": {"icon":"","label":"Any Package","description":"Every nixpkgs package that builds for this machine, like Install > Package","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix pick'"},
+  "install.nix.index": {"icon":"","label":"Rebuild Index","description":"Refresh the list of nixpkgs packages that build for this machine","when":"command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix index --refresh'"},
+  "remove.nix": {"icon":"󱄅","label":"Nix App","description":"Remove an app from the Nix profile","when":"command -v omarchy-nix >/dev/null 2>&1","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu remove'"},
+  "update.nix": {"icon":"󱄅","label":"Nix Apps","description":"Upgrade every app in the Nix profile","when":"command -v omarchy-nix >/dev/null 2>&1 && (command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ])","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix update'"},
+  "setup.nix": {"icon":"󱄅","label":"Nix","description":"Install Determinate Nix","when":"command -v omarchy-nix >/dev/null 2>&1 && ! command -v nix >/dev/null 2>&1 && [ ! -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix setup'"},
+  // <<< omarchy-nix-apps
 }

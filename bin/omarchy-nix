@@ -22,6 +22,12 @@ ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env.d/50-omarchy-nix-apps.sh"
 [[ -r $CONFIG_FILE ]] && source "$CONFIG_FILE"
 
 CATALOG="${NIX_APPS_CATALOG:-$PLUGIN_DIR/apps.json}"
+INDEX_FILE="$STATE_DIR/nixpkgs-index.tsv"
+UPDATES_FILE="$STATE_DIR/updates.json"
+# How stale the update check may get before the next --brief recomputes it.
+UPDATE_MAX_AGE="${NIX_APPS_UPDATE_MAX_AGE:-21600}"
+# How stale the searchable nixpkgs index may get, in seconds.
+INDEX_MAX_AGE="${NIX_APPS_INDEX_MAX_AGE:-604800}"
 FLAKE="${NIX_APPS_FLAKE:-nixpkgs}"
 ALLOW_UNFREE="${NIX_APPS_ALLOW_UNFREE:-1}"
 INSTALLER_URL="${NIX_APPS_INSTALLER_URL:-https://install.determinate.systems/nix}"
@@ -194,6 +200,26 @@ profile_rows() {
       else ($e | to_entries[] | [(.key | tostring), (.value.attrPath // ""), (.value.originalUrl // .value.url // "")])
       end
     | @tsv'
+}
+
+# element-name \t attrPath \t comma-joined store paths
+profile_rows_detailed() {
+  nixrun profile list --json 2>/dev/null | jq -r '
+    (.elements // {}) as $e
+    | if ($e | type) == "object"
+      then ($e | to_entries[] | [.key, (.value.attrPath // ""), ((.value.storePaths // []) | join(","))])
+      else ($e | to_entries[] | [(.key | tostring), (.value.attrPath // ""), ((.value.storePaths // []) | join(","))])
+      end
+    | @tsv'
+}
+
+# nix records an element as legacyPackages.<system>.<attr>; everything else in
+# here speaks the bare attribute.
+strip_attr_prefix() {
+  local path="$1"
+  path="${path#legacyPackages."$SYSTEM".}"
+  path="${path#packages."$SYSTEM".}"
+  printf '%s\n' "$path"
 }
 
 installed_attr() {
@@ -557,7 +583,7 @@ cmd_update() {
   fi
   local rc=$?
   refresh_desktop_db
-  ((rc == 0)) && ok "Up to date" || bad "upgrade failed"
+  if ((rc == 0)); then ok "Up to date"; else bad "upgrade failed"; fi
   return $rc
 }
 
@@ -626,12 +652,361 @@ verified_state() {
     select(.system == $s) | .results[$a] // empty' "$f" 2>/dev/null
 }
 
+# ---------------------------------------------------------------- updates
+
+# Which installed apps would change if you upgraded right now.
+#
+# Nix has no "check for updates" that stops short of doing the work, so this
+# evaluates the current outPath for every installed attribute and compares it
+# with the store path the profile actually holds. Evaluation is cheap next to
+# a download, but it is not free, hence the cache: the bar widget reads the
+# cache, and only a cache older than UPDATE_MAX_AGE triggers a fresh check.
+compute_updates() {
+  local names=() attrs=() paths=() name attrpath storepaths attr
+  while IFS=$'\t' read -r name attrpath storepaths; do
+    [[ -z $name ]] && continue
+    attr=$(strip_attr_prefix "$attrpath")
+    valid_attr "$attr" || continue
+    names+=("$name")
+    attrs+=("$attr")
+    paths+=("$storepaths")
+  done < <(profile_rows_detailed)
+
+  if ((${#attrs[@]} == 0)); then
+    jq -n --arg sys "$SYSTEM" --arg flake "$FLAKE" \
+      '{system: $sys, flake: $flake, checkedAt: (now | todate), count: 0, outdated: []}'
+    return 0
+  fi
+
+  local quoted="" a
+  for a in "${attrs[@]}"; do quoted+="\"$a\" "; done
+
+  local current
+  current=$(nixrun eval --impure --json --expr "
+    let
+      pkgs = $(nix_expr_pkgs);
+      lib = pkgs.lib;
+      outPathOf = path:
+        let probe = builtins.tryEval (lib.attrByPath (lib.splitString \".\" path) null pkgs);
+        in if !probe.success || probe.value == null then null
+           else let r = builtins.tryEval (toString probe.value.outPath);
+                in if r.success then r.value else null;
+    in builtins.listToAttrs (map (p: { name = p; value = outPathOf p; }) [ $quoted ])
+  " 2>/dev/null) || return 1
+  [[ -n $current ]] || return 1
+
+  local outdated="[]" i want
+  for i in "${!attrs[@]}"; do
+    want=$(jq -r --arg a "${attrs[$i]}" '.[$a] // empty' <<<"$current")
+    [[ -n $want ]] || continue
+    # Already holding that exact store path? Then there is nothing to fetch.
+    case ",${paths[$i]}," in
+      *",$want,"*) continue ;;
+    esac
+    outdated=$(jq --arg n "${names[$i]}" --arg a "${attrs[$i]}" \
+      '. + [{name: $n, attr: $a}]' <<<"$outdated")
+  done
+
+  jq -n --arg sys "$SYSTEM" --arg flake "$FLAKE" --argjson outdated "$outdated" \
+    '{system: $sys, flake: $flake, checkedAt: (now | todate), count: ($outdated | length), outdated: $outdated}'
+}
+
+cache_age() {
+  local file="$1" mtime now
+  [[ -r $file ]] || { echo 999999999; return; }
+  mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  echo $((now - mtime))
+}
+
+cmd_updates() {
+  local brief=0 refresh=0 as_notification=0 max_age="$UPDATE_MAX_AGE"
+  while (($#)); do
+    case "$1" in
+      --brief) brief=1; shift ;;
+      --notify) as_notification=1; shift ;;
+      --refresh) refresh=1; shift ;;
+      --max-age) max_age="${2:-$UPDATE_MAX_AGE}"; shift 2 ;;
+      -h | --help)
+        echo "Usage: omarchy-nix updates [--brief] [--notify] [--refresh] [--max-age SECONDS]"
+        return 0
+        ;;
+      *) die "unknown updates option: $1" ;;
+    esac
+  done
+
+  if ((as_notification)); then
+    local body
+    body=$(cmd_updates 2>&1 | sed 's/\x1b\[[0-9;]*m//g')
+    if command -v omarchy-notification-send >/dev/null 2>&1; then
+      omarchy-notification-send -g "$GLYPH" "Nix apps" "$body"
+    else
+      printf '%s\n' "$body"
+    fi
+    return 0
+  fi
+
+  # No Nix, no answer — and for --brief a non-zero exit is how the bar widget
+  # learns to stay hidden.
+  find_nix || { ((brief)) || echo "Nix is not installed. Run: omarchy-nix setup"; return 1; }
+  require_nix
+  mkdir -p "$STATE_DIR"
+
+  if ((refresh)) || [[ $(cache_age "$UPDATES_FILE") -gt $max_age ]]; then
+    local fresh
+    if fresh=$(compute_updates); then
+      printf '%s\n' "$fresh" >"$UPDATES_FILE"
+    elif [[ ! -r $UPDATES_FILE ]]; then
+      ((brief)) || bad "could not check for updates (offline?)"
+      return 1
+    fi
+  fi
+
+  local count
+  count=$(jq -r '.count // 0' "$UPDATES_FILE" 2>/dev/null || echo 0)
+
+  if ((brief)); then
+    printf '%s\n' "$count"
+    # Exit non-zero when there is nothing to show, so a caller can treat
+    # "no updates" and "no Nix" the same way.
+    ((count > 0))
+    return
+  fi
+
+  if ((count == 0)); then
+    ok "Every Nix app is up to date"
+    return 0
+  fi
+
+  info "$count update(s) available — run: omarchy-nix update"
+  jq -r '.outdated[] | "  \(.name)  (\(.attr))"' "$UPDATES_FILE"
+}
+
+# ----------------------------------------------------------- nixpkgs index
+
+# `pacman -Slq` is instant because the package list is already on disk. The
+# nixpkgs equivalent has to be evaluated, so it gets built once and cached;
+# after that the picker filters locally and feels the same.
+#
+# Two deliberate narrowings, both in service of "what can I actually install
+# on this machine":
+#
+#   - only attributes whose meta.platforms covers $SYSTEM, and that are not
+#     marked broken. `nix search` happily lists Spotify and Slack on aarch64
+#     even though upstream ships x86_64 binaries only; those belong in the
+#     catalogue's `unavailable` list, not in a picker that offers to install
+#     them.
+#   - only top-level attributes. python3Packages.* and friends are libraries,
+#     not apps, and dropping them takes the list from ~112k rows to ~22k.
+#
+# `omarchy-nix search` still goes straight to `nix search`, so nothing is
+# actually out of reach.
+ensure_index() {
+  local force="${1:-0}"
+  mkdir -p "$STATE_DIR"
+  if ((!force)) && [[ -s $INDEX_FILE ]] && [[ $(cache_age "$INDEX_FILE") -le $INDEX_MAX_AGE ]]; then
+    return 0
+  fi
+
+  info "Indexing $FLAKE packages that build for $SYSTEM (seconds, once nixpkgs is fetched)"
+  local tmp
+  tmp=$(mktemp)
+  if ! nixrun eval --impure --json --expr "
+    let
+      pkgs = $(nix_expr_pkgs);
+      lib = pkgs.lib;
+      probe = name:
+        let r = builtins.tryEval (
+          let v = pkgs.\${name}; in
+          if !(lib.isDerivation v) then null
+          else let m = v.meta or {}; in
+            if (m.broken or false) then null
+            else if !(builtins.elem \"$SYSTEM\" (m.platforms or [])) then null
+            else { inherit name; version = v.version or \"\"; description = m.description or \"\"; }
+        );
+        in if r.success then r.value else null;
+    in builtins.filter (x: x != null) (map probe (builtins.attrNames pkgs))
+  " 2>/dev/null |
+    jq -r '.[] | [.name, .version, ((.description // "") | gsub("\\s+"; " "))] | @tsv' >"$tmp"; then
+    rm -f "$tmp"
+    bad "could not build the index"
+    return 1
+  fi
+
+  if [[ ! -s $tmp ]]; then
+    rm -f "$tmp"
+    bad "the index came back empty"
+    return 1
+  fi
+
+  sort -o "$tmp" "$tmp"
+  mv "$tmp" "$INDEX_FILE"
+  ok "$(wc -l <"$INDEX_FILE") packages build for $SYSTEM"
+}
+
+index_lines() {
+  [[ -s $INDEX_FILE ]] || return 1
+  awk -F'\t' '{ printf "%-42s %-14s %s\n", $1, $2, $3 }' "$INDEX_FILE"
+}
+
+index_count() {
+  [[ -s $INDEX_FILE ]] && wc -l <"$INDEX_FILE" || echo 0
+}
+
+cmd_index() {
+  # --print is what fzf reloads from. It builds only when there is nothing to
+  # read at all — a stale index still prints, because a picker that freezes
+  # for a minute on a keypress is worse than one showing last week's list.
+  if [[ ${1:-} == --print ]]; then
+    if [[ ! -s $INDEX_FILE ]]; then
+      require_nix
+      ensure_index >&2 || return 1
+    fi
+    index_lines
+    return
+  fi
+  require_nix
+  local force=0
+  [[ ${1:-} == --refresh ]] && force=1
+  ensure_index "$force"
+}
+
+# Preview pane for the picker: everything here comes off the cached index,
+# the catalogue and pacman, so it stays instant while fzf redraws.
+cmd_info() {
+  local attr="${1:-}"
+  [[ -n $attr ]] || return 0
+
+  local line version description
+  line=$(awk -F'\t' -v a="$attr" '$1 == a { print; exit }' "$INDEX_FILE" 2>/dev/null)
+  IFS=$'\t' read -r _ version description <<<"$line"
+
+  printf '%s%s%s\n' "$C_BOLD" "$attr" "$C_RESET"
+  [[ -n ${version:-} ]] && printf '  version      %s\n' "$version"
+  [[ -n ${description:-} ]] && printf '  description  %s\n' "$description"
+
+  local app
+  app=$(jq -r --arg a "$attr" '[.apps[] | select(.attr == $a)][0] // empty' "$CATALOG" 2>/dev/null)
+  if [[ -n $app ]]; then
+    printf '  catalogue    %s (%s)%s\n' \
+      "$(jq -r '.name' <<<"$app")" "$(jq -r '.category' <<<"$app")" \
+      "$([[ $(jq -r '.unfree // false' <<<"$app") == true ]] && echo ", unfree")"
+  fi
+
+  # The index is already filtered to what builds here, so a hit in it is the
+  # strongest answer available; verified.json only covers the catalogue.
+  local state
+  if [[ -n $line ]]; then
+    printf '  platform     builds for %s\n' "$SYSTEM"
+  else
+    state=$(verified_state "$attr" 2>/dev/null || true)
+    case "$state" in
+      ok) printf '  platform     builds for %s\n' "$SYSTEM" ;;
+      unsupported) printf '  platform     %sno %s build%s\n' "$C_YELLOW" "$SYSTEM" "$C_RESET" ;;
+      missing) printf '  platform     %sattribute not in %s%s\n' "$C_RED" "$FLAKE" "$C_RESET" ;;
+      *) [[ -s $INDEX_FILE ]] && printf '  platform     %snot among the %s packages that build for %s%s\n' \
+        "$C_YELLOW" "$(index_count)" "$SYSTEM" "$C_RESET" ;;
+    esac
+  fi
+
+  local arch_pkg
+  arch_pkg=$(jq -r --arg a "$attr" '[.apps[] | select(.attr == $a)][0].arch // empty' "$CATALOG" 2>/dev/null)
+  arch_pkg="${arch_pkg:-$attr}"
+  if pacman -Si "$arch_pkg" &>/dev/null; then
+    printf '  %sarch repos   %s is packaged natively — prefer: omarchy pkg add %s%s\n' \
+      "$C_YELLOW" "$arch_pkg" "$arch_pkg" "$C_RESET"
+  fi
+
+  local hint
+  hint=$(unavailable_note "$attr")
+  if [[ -n $hint ]]; then
+    printf '  %sknown gap    %s%s\n' "$C_YELLOW" "$hint" "$C_RESET"
+  fi
+
+  printf '\n  install with omarchy-nix install %s\n' "$attr"
+}
+
+# ------------------------------------------------------------ fzf pickers
+
+fzf_pick() {
+  # Same keys and colours as omarchy-pkg-install, so the muscle memory carries.
+  local header="$1" query="${2:-}"
+  shift 2 2>/dev/null || shift $#
+  fzf \
+    --multi \
+    --preview 'omarchy-nix info {1}' \
+    --preview-label='alt-p: toggle preview, alt-j/k: scroll, tab: multi-select' \
+    --preview-label-pos='bottom' \
+    --preview-window 'down:65%:wrap' \
+    --bind 'alt-p:toggle-preview' \
+    --bind 'alt-d:preview-half-page-down,alt-u:preview-half-page-up' \
+    --bind 'alt-k:preview-up,alt-j:preview-down' \
+    --color 'pointer:green,marker:green' \
+    --header "$header" \
+    --query "$query" \
+    "$@"
+}
+
+cmd_pick() {
+  require_nix
+  interactive || die "the picker needs a terminal"
+  command -v fzf >/dev/null 2>&1 || die "fzf is required for the picker"
+  ensure_index || return 1
+
+  local selection attrs=()
+  selection=$(index_lines |
+    fzf_pick "Every package that builds for $SYSTEM — enter to install, tab for several" \
+      "${*:-}" --prompt "All $(index_count) for $SYSTEM > ") || return 0
+  [[ -n $selection ]] || return 0
+
+  while read -r line; do
+    [[ -z $line ]] && continue
+    attrs+=("$(awk '{print $1}' <<<"$line")")
+  done <<<"$selection"
+
+  cmd_install "${attrs[@]}"
+}
+
 # ------------------------------------------------------------------- menu
+
+# The curated catalogue as picker rows. Also reachable as `menu --print`,
+# which is what the picker reloads from when you toggle back out of the full
+# package list.
+catalog_lines() {
+  local -A installed=()
+  local name path
+  while IFS=$'\t' read -r name path _; do
+    [[ -n $path ]] && installed["$(strip_attr_prefix "$path")"]=1
+  done < <(profile_rows)
+
+  local id app_name attr category unfree state marker
+  while IFS=$'\t' read -r id app_name attr category unfree; do
+    if [[ -n ${installed[$attr]:-} ]]; then
+      marker="installed"
+    else
+      state=$(verified_state "$attr" || true)
+      case "$state" in
+        unsupported) marker="no $SYSTEM build" ;;
+        missing) marker="attr gone" ;;
+        *) marker="" ;;
+      esac
+    fi
+    [[ $unfree == true ]] && app_name="$app_name (unfree)"
+    printf '%-28s %-28s %-14s %s\n' "$attr" "$app_name" "$category" "$marker"
+  done < <(jq -r '.apps[] | [.id, .name, .attr, .category, ((.unfree // false) | tostring)] | @tsv' "$CATALOG")
+}
 
 cmd_menu() {
   local mode="${1:-install}"
-  command -v gum >/dev/null 2>&1 || die "gum is required for the picker"
+
+  if [[ $mode == --print ]]; then
+    require_nix
+    catalog_lines
+    return
+  fi
+
   interactive || die "the picker needs a terminal (run it from the Omarchy menu)"
+  command -v fzf >/dev/null 2>&1 || die "fzf is required for the picker"
 
   if ! find_nix; then
     info "Nix is not installed yet."
@@ -641,54 +1016,49 @@ cmd_menu() {
   require_nix
 
   if [[ $mode == remove ]]; then
-    local rows selection
-    rows=$(profile_rows | awk -F'\t' '{ n = $2; sub(/.*\./, "", n); printf "%-22s %s\n", $1, n }')
+    local rows selection names=()
+    rows=$(profile_rows_detailed | awk -F'\t' '{ n = $2; sub(/.*\./, "", n); printf "%-30s %s\n", $1, n }')
     [[ -n $rows ]] || die "nothing installed in the Nix profile"
-    selection=$(printf '%s\n' "$rows" | gum choose --no-limit --height 20 \
-      --header "Remove which Nix apps? (space to pick, enter to confirm)") || return 0
+    selection=$(printf '%s\n' "$rows" | fzf_pick "Remove from the Nix profile — tab for several") || return 0
     [[ -n $selection ]] || return 0
-    local names=()
-    while read -r line; do names+=("$(awk '{print $1}' <<<"$line")"); done <<<"$selection"
+    while read -r line; do
+      [[ -z $line ]] && continue
+      names+=("$(awk '{print $1}' <<<"$line")")
+    done <<<"$selection"
     cmd_remove "${names[@]}"
     return
   fi
 
-  local -A installed=()
-  local name path
-  while IFS=$'\t' read -r name path _; do
-    [[ -n $path ]] && installed["${path##*.}"]=1
-  done < <(profile_rows)
+  # alt-a flips the same picker between the ~50 curated apps and every
+  # package that builds for this machine, and back. Which list you are in is
+  # read off the prompt, so fzf itself carries the state and this stays one
+  # binding rather than two half-modes.
+  local n
+  n=$(index_count)
+  local prompt_curated="Curated > " prompt_all
+  if ((n > 0)); then
+    prompt_all="All $n for $SYSTEM > "
+  else
+    prompt_all="All packages for $SYSTEM > "
+  fi
 
-  local lines=() id app_name attr category unfree state marker
-  while IFS=$'\t' read -r id app_name attr category unfree; do
-    marker="  "
-    if [[ -n ${installed[${attr##*.}]:-} ]]; then
-      marker="✓ "
-    else
-      state=$(verified_state "$attr" || true)
-      case "$state" in
-        unsupported) marker="✗ " ;;
-        missing) marker="? " ;;
-      esac
-    fi
-    [[ $unfree == true ]] && app_name="$app_name (unfree)"
-    lines+=("$(printf '%s%-26s %-14s %s' "$marker" "$app_name" "$category" "$id")")
-  done < <(jq -r '.apps[] | [.id, .name, .attr, .category, ((.unfree // false) | tostring)] | @tsv' "$CATALOG")
+  local toggle="alt-a:transform:case \$FZF_PROMPT in Curated*) echo 'change-prompt($prompt_all)+reload(omarchy-nix index --print)';; *) echo 'change-prompt($prompt_curated)+reload(omarchy-nix menu --print)';; esac"
 
-  local selection
-  selection=$(printf '%s\n' "${lines[@]}" | gum choose --no-limit --height 20 \
-    --header "Install Nix apps on $SYSTEM  (✓ installed, ✗ no $SYSTEM build)") || return 0
+  local header="Curated apps for $SYSTEM — enter to install, tab for several, alt-a for every package that builds here"
+  ((n > 0)) || header+=" (first alt-a builds that list)"
+
+  local selection attrs=()
+  selection=$(catalog_lines |
+    fzf_pick "$header" "" --prompt "$prompt_curated" --bind "$toggle") || return 0
   [[ -n $selection ]] || return 0
 
-  local ids=()
   while read -r line; do
     [[ -z $line ]] && continue
-    ids+=("$(awk '{print $NF}' <<<"$line")")
+    attrs+=("$(awk '{print $1}' <<<"$line")")
   done <<<"$selection"
 
-  cmd_install "${ids[@]}"
+  cmd_install "${attrs[@]}"
 }
-
 # ----------------------------------------------------------------- doctor
 
 cmd_doctor() {
@@ -752,9 +1122,18 @@ cmd_doctor() {
 
   info "Tooling"
   local t
-  for t in jq gum curl pacman; do
+  for t in jq fzf gum curl pacman; do
     if command -v "$t" >/dev/null 2>&1; then ok "$t"; else bad "$t missing"; ((problems++)); fi
   done
+
+  info "Package list"
+  if [[ -s $INDEX_FILE ]]; then
+    local age=$(( $(cache_age "$INDEX_FILE") / 86400 ))
+    ok "$(index_count) packages build for $SYSTEM (indexed ${age}d ago)"
+    ((age * 86400 > INDEX_MAX_AGE)) && warn "stale — refresh with: omarchy-nix index --refresh"
+  else
+    warn "not built yet — omarchy-nix index, or alt-a in the picker"
+  fi
 
   echo
   if ((problems)); then
@@ -781,7 +1160,8 @@ usage() {
 ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectures Arch does not cover
 
   ${C_BOLD}setup${C_RESET} [--env-only]        Install Determinate Nix and wire it into the session
-  ${C_BOLD}menu${C_RESET} [remove]             Pick apps to install (or remove) in a TUI
+  ${C_BOLD}menu${C_RESET} [remove]             Pick from the curated catalogue (or remove); alt-a for every package
+  ${C_BOLD}pick${C_RESET} [query]              Pick straight from every package that builds for $SYSTEM
   ${C_BOLD}install${C_RESET} <app|attr>...     Install by catalogue id, name, or nixpkgs attribute
       --force                 install even when a native Arch package exists
       --no-check              skip the meta.platforms check
@@ -791,6 +1171,8 @@ ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectu
   ${C_BOLD}search${C_RESET} <query>            Search nixpkgs
   ${C_BOLD}catalog${C_RESET} [--json]          Show the curated app catalogue
   ${C_BOLD}verify${C_RESET}                    Check every catalogue entry against $SYSTEM and cache it
+  ${C_BOLD}updates${C_RESET} [--brief]         What would change on an upgrade (cached; --refresh forces)
+  ${C_BOLD}index${C_RESET} [--refresh]         Rebuild the list of packages that build for $SYSTEM
   ${C_BOLD}status${C_RESET} [--brief]          Profile summary (--brief prints the app count)
   ${C_BOLD}doctor${C_RESET}                    Diagnose the Nix + Omarchy integration
   ${C_BOLD}gc${C_RESET}                        Trim old generations and collect garbage
@@ -815,7 +1197,11 @@ main() {
     status) cmd_status "$@" ;;
     doctor) cmd_doctor "$@" ;;
     gc) cmd_gc "$@" ;;
-    menu | pick) cmd_menu "$@" ;;
+    menu) cmd_menu "$@" ;;
+    pick | browse) cmd_pick "$@" ;;
+    updates) cmd_updates "$@" ;;
+    index) cmd_index "$@" ;;
+    info) cmd_info "$@" ;;
     help | -h | --help) usage ;;
     *) usage; die "unknown command: $cmd" ;;
   esac

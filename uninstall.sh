@@ -39,6 +39,7 @@ Still on this machine, on purpose:
   - the apps in your Nix profile   remove with: nix profile remove <name>
   - Nix itself                     remove with: /nix/nix-installer uninstall
   - ~/.config/omarchy-nix/config   your settings
+  - ~/.local/state/omarchy-nix     the package list and update caches
   - the plugin folder              remove with: omarchy plugin remove dz0ny.nix-apps
 
 EOS
