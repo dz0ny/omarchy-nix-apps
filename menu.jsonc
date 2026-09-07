@@ -1,0 +1,12 @@
+{
+  // Menu entries contributed by the dz0ny.nix-apps plugin.
+  //
+  // install.sh merges these into ~/.config/omarchy/extensions/omarchy-menu.jsonc
+  // between managed markers. This copy is here so you can paste them yourself
+  // if you would rather not run the installer.
+
+  "install.nix": {"icon":"󱄅","label":"Nix App","description":"Install a big desktop app from nixpkgs","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu'"},
+  "remove.nix": {"icon":"󱄅","label":"Nix App","description":"Remove an app from the Nix profile","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix menu remove'"},
+  "update.nix": {"icon":"󱄅","label":"Nix Apps","description":"Upgrade every app in the Nix profile","when":"command -v nix >/dev/null 2>&1 || [ -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix update'"},
+  "setup.nix": {"icon":"󱄅","label":"Nix","description":"Install Determinate Nix","when":"! command -v nix >/dev/null 2>&1 && [ ! -x /nix/var/nix/profiles/default/bin/nix ]","action":"omarchy-launch-floating-terminal-with-presentation 'omarchy-nix setup'"},
+}

@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "comment": "Curated catalogue of big desktop apps to pull from nixpkgs when the Arch repos/AUR have nothing for this architecture. Attr names track nixpkgs and drift over time - `omarchy-nix verify` resolves every entry against the configured flake and caches the result, and `omarchy-nix install` refuses an attr that does not advertise this system in meta.platforms.",
+  "apps": [
+    { "id": "vscode",            "name": "Visual Studio Code",   "attr": "vscode",                     "category": "Editors",       "unfree": true,  "arch": "visual-studio-code-bin" },
+    { "id": "vscodium",          "name": "VSCodium",             "attr": "vscodium",                   "category": "Editors",       "arch": "vscodium-bin" },
+    { "id": "zed",               "name": "Zed",                  "attr": "zed-editor",                 "category": "Editors",       "arch": "zed" },
+    { "id": "sublime",           "name": "Sublime Text 4",       "attr": "sublime4",                   "category": "Editors",       "unfree": true,  "arch": "sublime-text-4" },
+    { "id": "neovide",           "name": "Neovide",              "attr": "neovide",                    "category": "Editors",       "arch": "neovide" },
+    { "id": "idea",              "name": "IntelliJ IDEA CE",     "attr": "jetbrains.idea-community",   "category": "Editors",       "arch": "intellij-idea-community-edition" },
+    { "id": "pycharm",           "name": "PyCharm CE",           "attr": "jetbrains.pycharm-community","category": "Editors",       "arch": "pycharm-community-edition" },
+
+    { "id": "firefox",           "name": "Firefox",              "attr": "firefox",                    "category": "Browsers",      "arch": "firefox" },
+    { "id": "chromium",          "name": "Chromium",             "attr": "chromium",                   "category": "Browsers",      "arch": "chromium" },
+    { "id": "ungoogled",         "name": "Ungoogled Chromium",   "attr": "ungoogled-chromium",         "category": "Browsers",      "arch": "ungoogled-chromium" },
+    { "id": "brave",             "name": "Brave",                "attr": "brave",                      "category": "Browsers",      "unfree": true,  "arch": "brave-bin" },
+
+    { "id": "telegram",          "name": "Telegram Desktop",     "attr": "telegram-desktop",           "category": "Communication", "arch": "telegram-desktop" },
+    { "id": "element",           "name": "Element",              "attr": "element-desktop",            "category": "Communication", "arch": "element-desktop" },
+    { "id": "thunderbird",       "name": "Thunderbird",          "attr": "thunderbird",                "category": "Communication", "arch": "thunderbird" },
+    { "id": "zulip",             "name": "Zulip",                "attr": "zulip",                      "category": "Communication", "arch": "zulip-desktop-bin" },
+
+    { "id": "gimp",              "name": "GIMP",                 "attr": "gimp3",                      "category": "Creative",      "arch": "gimp" },
+    { "id": "inkscape",          "name": "Inkscape",             "attr": "inkscape",                   "category": "Creative",      "arch": "inkscape" },
+    { "id": "krita",             "name": "Krita",                "attr": "krita",                      "category": "Creative",      "arch": "krita" },
+    { "id": "blender",           "name": "Blender",              "attr": "blender",                    "category": "Creative",      "arch": "blender" },
+    { "id": "darktable",         "name": "Darktable",            "attr": "darktable",                  "category": "Creative",      "arch": "darktable" },
+    { "id": "kdenlive",          "name": "Kdenlive",             "attr": "kdenlive",                   "category": "Creative",      "arch": "kdenlive" },
+    { "id": "shotcut",           "name": "Shotcut",              "attr": "shotcut",                    "category": "Creative",      "arch": "shotcut" },
+    { "id": "audacity",          "name": "Audacity",             "attr": "audacity",                   "category": "Creative",      "arch": "audacity" },
+    { "id": "obs",               "name": "OBS Studio",           "attr": "obs-studio",                 "category": "Creative",      "arch": "obs-studio" },
+    { "id": "handbrake",         "name": "HandBrake",            "attr": "handbrake",                  "category": "Creative",      "arch": "handbrake" },
+
+    { "id": "libreoffice",       "name": "LibreOffice",          "attr": "libreoffice-fresh",          "category": "Office",        "arch": "libreoffice-fresh" },
+    { "id": "obsidian",          "name": "Obsidian",             "attr": "obsidian",                   "category": "Office",        "unfree": true,  "arch": "obsidian" },
+    { "id": "joplin",            "name": "Joplin",               "attr": "joplin-desktop",             "category": "Office",        "arch": "joplin-desktop" },
+    { "id": "zotero",            "name": "Zotero",               "attr": "zotero",                     "category": "Office",        "arch": "zotero" },
+    { "id": "calibre",           "name": "Calibre",              "attr": "calibre",                    "category": "Office",        "arch": "calibre" },
+
+    { "id": "dbeaver",           "name": "DBeaver",              "attr": "dbeaver-bin",                "category": "Development",   "arch": "dbeaver" },
+    { "id": "bruno",             "name": "Bruno",                "attr": "bruno",                      "category": "Development",   "arch": "bruno-bin" },
+    { "id": "insomnia",          "name": "Insomnia",             "attr": "insomnia",                   "category": "Development",   "arch": "insomnia-bin" },
+    { "id": "meld",              "name": "Meld",                 "attr": "meld",                       "category": "Development",   "arch": "meld" },
+    { "id": "ghidra",            "name": "Ghidra",               "attr": "ghidra",                     "category": "Development",   "arch": "ghidra" },
+
+    { "id": "keepassxc",         "name": "KeePassXC",            "attr": "keepassxc",                  "category": "Utilities",     "arch": "keepassxc" },
+    { "id": "bitwarden",         "name": "Bitwarden",            "attr": "bitwarden-desktop",          "category": "Utilities",     "arch": "bitwarden" },
+    { "id": "localsend",         "name": "LocalSend",            "attr": "localsend",                  "category": "Utilities",     "arch": "localsend-bin" },
+    { "id": "rustdesk",          "name": "RustDesk",             "attr": "rustdesk",                   "category": "Utilities",     "arch": "rustdesk-bin" },
+    { "id": "remmina",           "name": "Remmina",              "attr": "remmina",                    "category": "Utilities",     "arch": "remmina" },
+    { "id": "nextcloud",         "name": "Nextcloud Client",     "attr": "nextcloud-client",           "category": "Utilities",     "arch": "nextcloud-client" },
+    { "id": "qbittorrent",       "name": "qBittorrent",          "attr": "qbittorrent",                "category": "Utilities",     "arch": "qbittorrent" },
+    { "id": "filezilla",         "name": "FileZilla",            "attr": "filezilla",                  "category": "Utilities",     "arch": "filezilla" },
+
+    { "id": "freecad",           "name": "FreeCAD",              "attr": "freecad",                    "category": "Engineering",   "arch": "freecad" },
+    { "id": "openscad",          "name": "OpenSCAD",             "attr": "openscad",                   "category": "Engineering",   "arch": "openscad" },
+    { "id": "kicad",             "name": "KiCad",                "attr": "kicad",                      "category": "Engineering",   "arch": "kicad" },
+    { "id": "prusaslicer",       "name": "PrusaSlicer",          "attr": "prusa-slicer",               "category": "Engineering",   "arch": "prusa-slicer" },
+    { "id": "orcaslicer",        "name": "OrcaSlicer",           "attr": "orca-slicer",                "category": "Engineering",   "arch": "orca-slicer-bin" },
+    { "id": "godot",             "name": "Godot 4",              "attr": "godot",                      "category": "Engineering",   "arch": "godot" },
+
+    { "id": "jellyfin",          "name": "Jellyfin Media Player","attr": "jellyfin-media-player",      "category": "Media",         "arch": "jellyfin-media-player" },
+    { "id": "feishin",           "name": "Feishin",              "attr": "feishin",                    "category": "Media",         "arch": "feishin-bin" },
+    { "id": "spotify-player",    "name": "spotify-player (TUI)", "attr": "spotify-player",             "category": "Media",         "arch": "spotify-player",
+      "note": "Official Spotify has no aarch64 Linux build; this is the terminal client against the Web API." },
+
+    { "id": "ollama",            "name": "Ollama",               "attr": "ollama",                     "category": "AI",            "arch": "ollama" }
+  ],
+  "unavailable": {
+    "comment": "Apps people ask for that ship x86_64-only upstream binaries, so nixpkgs has no aarch64-linux build either. Listed so the picker can explain instead of failing.",
+    "entries": [
+      { "name": "Spotify",        "why": "upstream ships x86_64 Linux only",  "instead": "spotify-player, or the Spotify web app" },
+      { "name": "Slack",          "why": "upstream ships x86_64 Linux only",  "instead": "web app (omarchy install webapp)" },
+      { "name": "Discord",        "why": "upstream ships x86_64 Linux only",  "instead": "vesktop / web app" },
+      { "name": "Zoom",           "why": "upstream ships x86_64 Linux only",  "instead": "web client" },
+      { "name": "Signal Desktop", "why": "upstream ships x86_64 Linux only",  "instead": "Signal on phone + web-less; or flatpak arm builds (unofficial)" },
+      { "name": "Android Studio", "why": "Google ships no Linux arm64 build", "instead": "IntelliJ IDEA CE + Android plugin" },
+      { "name": "Postman",        "why": "upstream ships x86_64 Linux only",  "instead": "Bruno or Insomnia" },
+      { "name": "LM Studio",      "why": "upstream ships x86_64 Linux only",  "instead": "Ollama" }
+    ]
+  }
+}

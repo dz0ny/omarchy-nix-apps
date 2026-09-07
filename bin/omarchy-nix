@@ -1,0 +1,807 @@
+#!/bin/bash
+# omarchy-nix — install big desktop apps from nixpkgs on Omarchy.
+#
+# Arch (and the AUR) carry a lot less for aarch64 than for x86_64, and the gap
+# is worst exactly where it hurts: large GUI applications. nixpkgs builds those
+# for aarch64-linux and cache.nixos.org has them prebuilt, so this pulls them
+# into a per-user Nix profile and leaves the base system to pacman.
+#
+# Part of the dz0ny.nix-apps Omarchy plugin.
+
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="$(dirname "$(dirname "$SELF")")"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-nix"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-nix"
+CONFIG_FILE="$CONFIG_DIR/config"
+ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/uwsm/env.d/50-omarchy-nix-apps.sh"
+
+# shellcheck disable=SC1090
+[[ -r $CONFIG_FILE ]] && source "$CONFIG_FILE"
+
+CATALOG="${NIX_APPS_CATALOG:-$PLUGIN_DIR/apps.json}"
+FLAKE="${NIX_APPS_FLAKE:-nixpkgs}"
+ALLOW_UNFREE="${NIX_APPS_ALLOW_UNFREE:-1}"
+INSTALLER_URL="${NIX_APPS_INSTALLER_URL:-https://install.determinate.systems/nix}"
+
+case "$(uname -m)" in
+  aarch64 | arm64) SYSTEM="aarch64-linux" ;;
+  x86_64 | amd64) SYSTEM="x86_64-linux" ;;
+  *) SYSTEM="$(uname -m)-linux" ;;
+esac
+
+# ------------------------------------------------------------------ output
+
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'
+else
+  C_RESET=""; C_DIM=""; C_BOLD=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""
+fi
+
+info() { printf '%s\n' "${C_BLUE}==>${C_RESET} $*"; }
+ok() { printf '%s\n' "${C_GREEN}  ✓${C_RESET} $*"; }
+warn() { printf '%s\n' "${C_YELLOW}  !${C_RESET} $*" >&2; }
+bad() { printf '%s\n' "${C_RED}  ✗${C_RESET} $*" >&2; }
+die() { printf '%s\n' "${C_RED}omarchy-nix:${C_RESET} $*" >&2; exit 1; }
+notify() { command -v omarchy-notification-send >/dev/null 2>&1 && omarchy-notification-send "$@" >/dev/null 2>&1 || true; }
+interactive() { [[ -t 0 && -t 1 ]]; }
+
+# nf-md-nix, spelled out so the glyph survives any editor or transport.
+GLYPH=$'\U000F1105'
+
+confirm() {
+  interactive || return 0
+  if command -v gum >/dev/null 2>&1; then gum confirm "$1"; else
+    read -r -p "$1 [y/N] " reply
+    [[ $reply == [yY]* ]]
+  fi
+}
+
+# -------------------------------------------------------------------- nix
+
+NIX=""
+
+find_nix() {
+  [[ -n $NIX ]] && return 0
+  local candidate
+  for candidate in "$(type -P nix || true)" \
+    /nix/var/nix/profiles/default/bin/nix \
+    "$HOME/.nix-profile/bin/nix"; do
+    if [[ -n $candidate && -x $candidate ]]; then
+      NIX="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_nix() {
+  find_nix || die "Nix is not installed. Run: omarchy-nix setup"
+  # Child processes (and anything nix shells out to) should see the profile.
+  case ":$PATH:" in
+    *":$HOME/.nix-profile/bin:"*) ;;
+    *) PATH="$PATH:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin" ;;
+  esac
+  export PATH
+  # The Determinate installer exports this from /etc/profile.d, which a
+  # graphical session never sources; without it TLS to the cache fails.
+  if [[ -z ${NIX_SSL_CERT_FILE:-} && -r /etc/ssl/certs/ca-certificates.crt ]]; then
+    export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+  fi
+}
+
+nixrun() {
+  "$NIX" --extra-experimental-features "nix-command flakes" "$@"
+}
+
+# ---------------------------------------------------------------- catalog
+
+valid_attr() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+
+# id \t name \t attr \t unfree \t arch-package \t note
+resolve_app() {
+  local query="$1" row
+  row=$(jq -r --arg q "$query" '
+    [ .apps[] | select(
+        .id == $q
+        or .attr == $q
+        or ((.name | ascii_downcase) == ($q | ascii_downcase))
+      ) ][0]
+    | select(. != null)
+    | [.id, .name, .attr, ((.unfree // false) | tostring), (.arch // ""), (.note // "")]
+    | @tsv' "$CATALOG" 2>/dev/null)
+
+  if [[ -n $row ]]; then
+    printf '%s\n' "$row"
+    return 0
+  fi
+
+  # Not in the catalogue: treat the argument as a bare nixpkgs attribute.
+  local attr="${query#*#}"
+  valid_attr "$attr" || return 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$attr" "$attr" "$attr" "false" "" ""
+}
+
+unavailable_note() {
+  jq -r --arg q "$1" '
+    [ .unavailable.entries[]? | select((.name | ascii_downcase) | startswith($q | ascii_downcase)) ][0]
+    | select(. != null)
+    | "\(.name): \(.why). Try instead: \(.instead)"' "$CATALOG" 2>/dev/null
+}
+
+native_package() {
+  # True when pacman can serve this app from the repos for *this* architecture,
+  # in which case Nix is the wrong tool.
+  local pkg="$1"
+  [[ -n $pkg ]] || return 1
+  pacman -Si "$pkg" &>/dev/null
+}
+
+# ------------------------------------------------------- nixpkgs metadata
+
+nix_expr_pkgs() {
+  printf 'import (builtins.getFlake "%s") { system = "%s"; config.allowUnfree = %s; }' \
+    "$FLAKE" "$SYSTEM" "$([[ $ALLOW_UNFREE == 1 ]] && echo true || echo false)"
+}
+
+# Prints "ok", "unsupported" or "missing" for one attribute path.
+attr_state() {
+  local attr="$1" out
+  valid_attr "$attr" || { echo "missing"; return; }
+  out=$(nixrun eval --impure --json --expr "
+    let
+      pkgs = $(nix_expr_pkgs);
+      lib = pkgs.lib;
+      probe = builtins.tryEval (lib.attrByPath (lib.splitString \".\" \"$attr\") null pkgs);
+    in
+      if !probe.success || probe.value == null then null
+      else (probe.value.meta.platforms or [])
+  " 2>/dev/null)
+
+  case "$out" in
+    "" ) echo "unknown" ;;
+    "null" ) echo "missing" ;;
+    * )
+      if jq -e --arg s "$SYSTEM" 'index($s) != null' <<<"$out" >/dev/null 2>&1; then
+        echo "ok"
+      else
+        echo "unsupported"
+      fi
+      ;;
+  esac
+}
+
+# --------------------------------------------------------------- profile
+
+# element-name \t attrPath \t flake-url
+profile_rows() {
+  nixrun profile list --json 2>/dev/null | jq -r '
+    (.elements // {}) as $e
+    | if ($e | type) == "object"
+      then ($e | to_entries[] | [.key, (.value.attrPath // ""), (.value.originalUrl // .value.url // "")])
+      else ($e | to_entries[] | [(.key | tostring), (.value.attrPath // ""), (.value.originalUrl // .value.url // "")])
+      end
+    | @tsv'
+}
+
+installed_attr() {
+  # Element selector for an attribute, or empty when it is not installed.
+  local attr="$1" name path
+  while IFS=$'\t' read -r name path _; do
+    [[ -z $name ]] && continue
+    if [[ $path == "$attr" || $path == *".$attr" || $name == "${attr##*.}" ]]; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done < <(profile_rows)
+  return 1
+}
+
+refresh_desktop_db() {
+  local dir="$HOME/.nix-profile/share/applications"
+  [[ -d $dir ]] || return 0
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$dir" >/dev/null 2>&1
+  return 0
+}
+
+# ------------------------------------------------------------------ setup
+
+write_env_file() {
+  mkdir -p "$(dirname "$ENV_FILE")"
+  cat >"$ENV_FILE" <<'ENV_EOF'
+# Managed by omarchy-nix (Omarchy plugin dz0ny.nix-apps).
+# Regenerate with: omarchy-nix setup --env-only
+#
+# uwsm sources every file in ~/.config/uwsm/env.d before starting Hyprland, so
+# this is what puts Nix-installed .desktop files, icons and binaries in front
+# of the whole graphical session — the app launcher and omarchy-shell included.
+# /etc/profile.d/nix.sh only ever reaches login shells, which is why it is not
+# enough on its own.
+
+if [ -d "$HOME/.nix-profile/share" ]; then
+  XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  case ":$XDG_DATA_DIRS:" in
+    *":$HOME/.nix-profile/share:"*) ;;
+    *) XDG_DATA_DIRS="$XDG_DATA_DIRS:$HOME/.nix-profile/share:/nix/var/nix/profiles/default/share" ;;
+  esac
+  export XDG_DATA_DIRS
+fi
+
+# Appended, not prepended: a Nix profile that happens to contain git or bash
+# should not quietly displace the pacman-managed system tooling.
+if [ -d "$HOME/.nix-profile/bin" ]; then
+  case ":$PATH:" in
+    *":$HOME/.nix-profile/bin:"*) ;;
+    *) PATH="$PATH:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin" ;;
+  esac
+  export PATH
+fi
+
+if [ -z "${NIX_SSL_CERT_FILE:-}" ] && [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+  export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+fi
+ENV_EOF
+  ok "Session environment: $ENV_FILE"
+}
+
+write_config_file() {
+  [[ -f $CONFIG_FILE ]] && return 0
+  mkdir -p "$CONFIG_DIR"
+  cat >"$CONFIG_FILE" <<'CONF_EOF'
+# omarchy-nix configuration. Sourced by every omarchy-nix invocation.
+
+# Which flake apps come from. "nixpkgs" follows the registry (unstable).
+# Pin it for reproducibility, e.g.:
+#   NIX_APPS_FLAKE="github:NixOS/nixpkgs/nixos-unstable"
+NIX_APPS_FLAKE="nixpkgs"
+
+# Allow unfree packages (VS Code, Obsidian, Sublime, Brave...). Set to 0 to
+# refuse them.
+NIX_APPS_ALLOW_UNFREE=1
+
+# Path to an alternative app catalogue.
+# NIX_APPS_CATALOG="$HOME/.config/omarchy-nix/apps.json"
+CONF_EOF
+  ok "Config: $CONFIG_FILE"
+}
+
+cmd_setup() {
+  local env_only=0
+  while (($#)); do
+    case "$1" in
+      --env-only) env_only=1; shift ;;
+      -h | --help) echo "Usage: omarchy-nix setup [--env-only]"; return 0 ;;
+      *) die "unknown setup option: $1" ;;
+    esac
+  done
+
+  mkdir -p "$STATE_DIR"
+
+  if ((env_only)); then
+    write_env_file
+    write_config_file
+    return 0
+  fi
+
+  if find_nix; then
+    ok "Nix already installed: $NIX"
+  else
+    info "Installing Determinate Nix"
+    cat <<EOS
+
+  This installs Nix system-wide with the Determinate Systems installer:
+
+      curl -sSf -L $INSTALLER_URL | sh -s -- install --determinate --no-confirm
+
+  It creates /nix, adds a nix-daemon service and a build group, and can be
+  reverted at any time with:  /nix/nix-installer uninstall
+  It needs sudo, so expect a password prompt.
+
+EOS
+    confirm "Install Determinate Nix now?" || die "aborted"
+
+    curl --proto '=https' --tlsv1.2 -sSf -L "$INSTALLER_URL" |
+      sh -s -- install --determinate --no-confirm || die "the Nix installer failed"
+
+    find_nix || die "Nix installed but no nix binary was found on disk"
+    ok "Nix installed: $NIX"
+  fi
+
+  write_config_file
+  write_env_file
+
+  require_nix
+  info "Nix version: $(nixrun --version 2>/dev/null | head -1)"
+
+  cat <<EOS
+
+  ${C_BOLD}Next:${C_RESET}
+    omarchy-nix menu          pick apps to install
+    omarchy-nix install code  install one by catalogue id
+    omarchy-nix doctor        check the integration
+
+  Log out and back in once, so the session picks up XDG_DATA_DIRS and the
+  installed apps show up in the Omarchy launcher.
+
+EOS
+}
+
+# ---------------------------------------------------------------- install
+
+cmd_install() {
+  local force=0 skip_check=0 targets=()
+  while (($#)); do
+    case "$1" in
+      -f | --force) force=1; shift ;;
+      --no-check) skip_check=1; shift ;;
+      -h | --help)
+        echo "Usage: omarchy-nix install [--force] [--no-check] <app|nixpkgs-attr>..."
+        return 0
+        ;;
+      -*) die "unknown install option: $1" ;;
+      *) targets+=("$1"); shift ;;
+    esac
+  done
+  ((${#targets[@]})) || die "nothing to install (try: omarchy-nix menu)"
+
+  require_nix
+
+  local refs=() labels=() target row id name attr unfree arch note state selector
+  for target in "${targets[@]}"; do
+    if ! row=$(resolve_app "$target"); then
+      local hint
+      hint=$(unavailable_note "$target")
+      [[ -n $hint ]] && warn "$hint"
+      bad "unknown app: $target"
+      continue
+    fi
+    IFS=$'\t' read -r id name attr unfree arch note <<<"$row"
+
+    if selector=$(installed_attr "$attr"); then
+      ok "$name is already installed ($selector)"
+      continue
+    fi
+
+    if ((!force)) && native_package "$arch"; then
+      warn "$name is in the Arch repos for this machine as '$arch'."
+      warn "Prefer: omarchy pkg add $arch   (use --force to install from Nix anyway)"
+      continue
+    fi
+
+    if [[ $unfree == true && $ALLOW_UNFREE != 1 ]]; then
+      bad "$name is unfree and NIX_APPS_ALLOW_UNFREE=0"
+      continue
+    fi
+
+    if ((!skip_check)); then
+      info "Checking $name ($attr) for $SYSTEM"
+      state=$(attr_state "$attr")
+      case "$state" in
+        ok) ok "$attr builds for $SYSTEM" ;;
+        missing)
+          bad "$attr does not exist in $FLAKE — search with: omarchy-nix search ${name%% *}"
+          continue
+          ;;
+        unsupported)
+          bad "$attr does not list $SYSTEM in meta.platforms; upstream is likely x86_64-only"
+          [[ -n $note ]] && warn "$note"
+          warn "Install anyway with: omarchy-nix install --no-check $id"
+          continue
+          ;;
+        *) warn "could not evaluate $attr (offline?); attempting the install anyway" ;;
+      esac
+    fi
+
+    refs+=("$FLAKE#$attr")
+    labels+=("$name")
+  done
+
+  ((${#refs[@]})) || return 1
+
+  info "Installing: ${labels[*]}"
+  local env=()
+  [[ $ALLOW_UNFREE == 1 ]] && env=(NIXPKGS_ALLOW_UNFREE=1)
+  if env "${env[@]}" "$NIX" --extra-experimental-features "nix-command flakes" \
+    profile install --impure "${refs[@]}"; then
+    refresh_desktop_db
+    ok "Installed: ${labels[*]}"
+    notify -g "$GLYPH" "Nix apps installed" "${labels[*]}"
+  else
+    bad "install failed"
+    notify -u critical -g "$GLYPH" "Nix install failed" "${labels[*]}"
+    return 1
+  fi
+}
+
+# ----------------------------------------------------------------- remove
+
+cmd_remove() {
+  ((${#@})) || die "nothing to remove (try: omarchy-nix menu remove)"
+  require_nix
+
+  local target row id name attr selector selectors=() labels=()
+  for target in "$@"; do
+    if row=$(resolve_app "$target"); then
+      IFS=$'\t' read -r id name attr _ <<<"$row"
+    else
+      attr="$target"; name="$target"
+    fi
+    if selector=$(installed_attr "$attr"); then
+      selectors+=("$selector")
+      labels+=("$name")
+    else
+      warn "$name is not in the Nix profile"
+    fi
+  done
+
+  ((${#selectors[@]})) || return 1
+
+  if nixrun profile remove "${selectors[@]}"; then
+    refresh_desktop_db
+    ok "Removed: ${labels[*]}"
+  else
+    bad "remove failed"
+    return 1
+  fi
+}
+
+# ------------------------------------------------------------------- list
+
+cmd_list() {
+  require_nix
+  local json=0
+  [[ ${1:-} == --json ]] && json=1
+
+  if ((json)); then
+    profile_rows | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {name: .[0], attrPath: .[1], flake: .[2]})'
+    return 0
+  fi
+
+  local name path url attr pretty count=0
+  while IFS=$'\t' read -r name path url; do
+    [[ -z $name ]] && continue
+    attr="${path##*.}"
+    pretty=$(jq -r --arg a "$attr" '[.apps[] | select(.attr == $a or (.attr | endswith("." + $a)))][0].name // ""' "$CATALOG" 2>/dev/null)
+    printf '%s%-24s%s %s%s%s %s%s%s\n' \
+      "$C_BOLD" "$name" "$C_RESET" \
+      "" "${pretty:-$attr}" "" \
+      "$C_DIM" "${url:-$FLAKE}#$attr" "$C_RESET"
+    ((count++))
+  done < <(profile_rows)
+
+  ((count)) || echo "No apps installed in the Nix profile yet. Try: omarchy-nix menu"
+}
+
+# ----------------------------------------------------------------- status
+
+cmd_status() {
+  local brief=0 as_notification=0
+  case "${1:-}" in
+    --brief) brief=1 ;;
+    --notify) as_notification=1 ;;
+  esac
+
+  if ((as_notification)); then
+    local body
+    body=$(cmd_status 2>&1)
+    if command -v omarchy-notification-send >/dev/null 2>&1; then
+      omarchy-notification-send -g "$GLYPH" "Nix apps" "$body"
+    else
+      printf '%s\n' "$body"
+    fi
+    return 0
+  fi
+
+  if ! find_nix; then
+    ((brief)) && return 1
+    echo "Nix is not installed. Run: omarchy-nix setup"
+    return 1
+  fi
+  require_nix
+
+  local count
+  count=$(profile_rows | grep -c . || true)
+
+  if ((brief)); then
+    printf '%s\n' "$count"
+    return 0
+  fi
+
+  printf '%s\n' "Nix: $("$NIX" --version 2>/dev/null | head -1)"
+  printf '%s\n' "System: $SYSTEM   Flake: $FLAKE"
+  printf '%s\n' "Apps in profile: $count"
+  local store
+  store=$(du -sh /nix/store 2>/dev/null | cut -f1)
+  [[ -n $store ]] && printf '%s\n' "Store size: $store"
+}
+
+# ----------------------------------------------------------------- update
+
+cmd_update() {
+  require_nix
+  if (($#)); then
+    local target row attr selector selectors=()
+    for target in "$@"; do
+      if row=$(resolve_app "$target"); then
+        IFS=$'\t' read -r _ _ attr _ <<<"$row"
+      else
+        attr="$target"
+      fi
+      selector=$(installed_attr "$attr") && selectors+=("$selector")
+    done
+    ((${#selectors[@]})) || die "none of those are installed"
+    nixrun profile upgrade "${selectors[@]}"
+  else
+    info "Upgrading every app in the Nix profile"
+    NIXPKGS_ALLOW_UNFREE=1 nixrun profile upgrade --impure --all
+  fi
+  local rc=$?
+  refresh_desktop_db
+  ((rc == 0)) && ok "Up to date" || bad "upgrade failed"
+  return $rc
+}
+
+cmd_gc() {
+  require_nix
+  info "Dropping profile generations older than 30 days"
+  nixrun profile wipe-history --older-than 30d
+  info "Collecting garbage in the store (this can take a while)"
+  nixrun store gc
+  ok "Done. $(du -sh /nix/store 2>/dev/null | cut -f1) in /nix/store"
+}
+
+cmd_search() {
+  (($#)) || die "usage: omarchy-nix search <query>"
+  require_nix
+  nixrun search "$FLAKE" "$@"
+}
+
+# ----------------------------------------------------------------- verify
+
+cmd_verify() {
+  require_nix
+  local attrs expr out
+  attrs=$(jq -r '[.apps[].attr] | map("\"" + . + "\"") | join(" ")' "$CATALOG")
+
+  info "Evaluating ${FLAKE} for $SYSTEM — this takes a minute the first time"
+  expr="
+    let
+      pkgs = $(nix_expr_pkgs);
+      lib = pkgs.lib;
+      check = path:
+        let probe = builtins.tryEval (lib.attrByPath (lib.splitString \".\" path) null pkgs);
+        in if !probe.success || probe.value == null then \"missing\"
+           else if builtins.elem \"$SYSTEM\" (probe.value.meta.platforms or []) then \"ok\"
+           else \"unsupported\";
+    in builtins.listToAttrs (map (p: { name = p; value = check p; }) [ $attrs ])
+  "
+
+  out=$(nixrun eval --impure --json --expr "$expr") || die "evaluation failed"
+  mkdir -p "$STATE_DIR"
+  jq -n --argjson r "$out" --arg sys "$SYSTEM" --arg flake "$FLAKE" \
+    '{system: $sys, flake: $flake, checkedAt: (now | todate), results: $r}' \
+    >"$STATE_DIR/verified.json"
+
+  jq -r --slurpfile cat <(jq '.' "$CATALOG") '
+    to_entries[]
+    | . as $e
+    | ($cat[0].apps[] | select(.attr == $e.key)) as $app
+    | "\($e.value)\t\($app.name)\t\($e.key)"' <<<"$out" |
+    sort | while IFS=$'\t' read -r state name attr; do
+      case "$state" in
+        ok) ok "$name ${C_DIM}($attr)${C_RESET}" ;;
+        unsupported) warn "$name — no $SYSTEM build ${C_DIM}($attr)${C_RESET}" ;;
+        missing) bad "$name — attr gone from nixpkgs ${C_DIM}($attr)${C_RESET}" ;;
+      esac
+    done
+
+  echo
+  info "Cached to $STATE_DIR/verified.json"
+}
+
+verified_state() {
+  local attr="$1" f="$STATE_DIR/verified.json"
+  [[ -r $f ]] || return 1
+  jq -r --arg a "$attr" --arg s "$SYSTEM" '
+    select(.system == $s) | .results[$a] // empty' "$f" 2>/dev/null
+}
+
+# ------------------------------------------------------------------- menu
+
+cmd_menu() {
+  local mode="${1:-install}"
+  command -v gum >/dev/null 2>&1 || die "gum is required for the picker"
+  interactive || die "the picker needs a terminal (run it from the Omarchy menu)"
+
+  if ! find_nix; then
+    info "Nix is not installed yet."
+    confirm "Run omarchy-nix setup first?" || return 1
+    cmd_setup || return 1
+  fi
+  require_nix
+
+  if [[ $mode == remove ]]; then
+    local rows selection
+    rows=$(cmd_list | sed 's/\x1b\[[0-9;]*m//g')
+    [[ -n $rows ]] || die "nothing installed"
+    selection=$(printf '%s\n' "$rows" | gum choose --no-limit --height 20 \
+      --header "Remove which Nix apps? (space to pick, enter to confirm)") || return 0
+    [[ -n $selection ]] || return 0
+    local names=()
+    while read -r line; do names+=("$(awk '{print $1}' <<<"$line")"); done <<<"$selection"
+    cmd_remove "${names[@]}"
+    return
+  fi
+
+  local -A installed=()
+  local name path
+  while IFS=$'\t' read -r name path _; do
+    [[ -n $path ]] && installed["${path##*.}"]=1
+  done < <(profile_rows)
+
+  local lines=() id app_name attr category unfree state marker
+  while IFS=$'\t' read -r id app_name attr category unfree; do
+    marker="  "
+    if [[ -n ${installed[${attr##*.}]:-} ]]; then
+      marker="✓ "
+    else
+      state=$(verified_state "$attr" || true)
+      case "$state" in
+        unsupported) marker="✗ " ;;
+        missing) marker="? " ;;
+      esac
+    fi
+    [[ $unfree == true ]] && app_name="$app_name (unfree)"
+    lines+=("$(printf '%s%-26s %-14s %s' "$marker" "$app_name" "$category" "$id")")
+  done < <(jq -r '.apps[] | [.id, .name, .attr, .category, ((.unfree // false) | tostring)] | @tsv' "$CATALOG")
+
+  local selection
+  selection=$(printf '%s\n' "${lines[@]}" | gum choose --no-limit --height 20 \
+    --header "Install Nix apps on $SYSTEM  (✓ installed, ✗ no $SYSTEM build)") || return 0
+  [[ -n $selection ]] || return 0
+
+  local ids=()
+  while read -r line; do
+    [[ -z $line ]] && continue
+    ids+=("$(awk '{print $NF}' <<<"$line")")
+  done <<<"$selection"
+
+  cmd_install "${ids[@]}"
+}
+
+# ----------------------------------------------------------------- doctor
+
+cmd_doctor() {
+  local problems=0
+
+  info "Architecture"
+  printf '    %s (%s)\n' "$(uname -m)" "$SYSTEM"
+  if [[ $SYSTEM == x86_64-linux ]]; then
+    warn "on x86_64 the Arch repos and the AUR cover most of this catalogue — prefer omarchy pkg add"
+  fi
+
+  info "Nix"
+  if find_nix; then
+    ok "$NIX — $("$NIX" --version 2>/dev/null | head -1)"
+  else
+    bad "not installed — run: omarchy-nix setup"
+    ((problems++))
+  fi
+
+  if find_nix; then
+    require_nix
+    if systemctl is-active --quiet nix-daemon.service 2>/dev/null ||
+      systemctl is-active --quiet determinate-nixd.socket 2>/dev/null ||
+      systemctl is-active --quiet nix-daemon.socket 2>/dev/null; then
+      ok "nix-daemon is running"
+    else
+      bad "nix-daemon is not active"
+      ((problems++))
+    fi
+
+    if nixrun eval --expr '1 + 1' >/dev/null 2>&1; then
+      ok "flakes / nix-command usable"
+    else
+      bad "cannot evaluate — experimental features may be off"
+      ((problems++))
+    fi
+  fi
+
+  info "Desktop integration"
+  local apps_dir="$HOME/.nix-profile/share/applications"
+  if [[ -d $apps_dir ]]; then
+    ok "$(find "$apps_dir" -name '*.desktop' 2>/dev/null | wc -l) .desktop files in the Nix profile"
+  else
+    warn "no .desktop files yet (nothing installed)"
+  fi
+
+  if [[ -f $ENV_FILE ]]; then
+    ok "session env file present: $ENV_FILE"
+  else
+    bad "missing $ENV_FILE — run: omarchy-nix setup --env-only"
+    ((problems++))
+  fi
+
+  case ":${XDG_DATA_DIRS:-}:" in
+    *":$HOME/.nix-profile/share:"*) ok "XDG_DATA_DIRS includes the Nix profile" ;;
+    *)
+      warn "this session's XDG_DATA_DIRS does not include ~/.nix-profile/share"
+      warn "log out and back in — uwsm only reads env.d at session start"
+      ;;
+  esac
+
+  info "Tooling"
+  local t
+  for t in jq gum curl pacman; do
+    if command -v "$t" >/dev/null 2>&1; then ok "$t"; else bad "$t missing"; ((problems++)); fi
+  done
+
+  echo
+  if ((problems)); then
+    bad "$problems problem(s) found"
+    return 1
+  fi
+  ok "Everything looks good"
+}
+
+cmd_catalog() {
+  if [[ ${1:-} == --json ]]; then
+    cat "$CATALOG"
+    return 0
+  fi
+  jq -r '.apps[] | [.category, .name, .id, .attr] | @tsv' "$CATALOG" |
+    sort | awk -F'\t' '{ if ($1 != last) { print ""; print "  " toupper($1); last = $1 } printf "    %-26s %-16s %s\n", $2, $3, $4 }'
+  echo
+  echo "  NOT AVAILABLE FOR ARM (upstream ships x86_64 only)"
+  jq -r '.unavailable.entries[]? | "    \(.name) — \(.why); try: \(.instead)"' "$CATALOG"
+}
+
+usage() {
+  cat <<EOS
+${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectures Arch does not cover
+
+  ${C_BOLD}setup${C_RESET} [--env-only]        Install Determinate Nix and wire it into the session
+  ${C_BOLD}menu${C_RESET} [remove]             Pick apps to install (or remove) in a TUI
+  ${C_BOLD}install${C_RESET} <app|attr>...     Install by catalogue id, name, or nixpkgs attribute
+      --force                 install even when a native Arch package exists
+      --no-check              skip the meta.platforms check
+  ${C_BOLD}remove${C_RESET} <app>...           Remove from the Nix profile
+  ${C_BOLD}list${C_RESET} [--json]             What is installed in the Nix profile
+  ${C_BOLD}update${C_RESET} [app...]           Upgrade everything, or just these
+  ${C_BOLD}search${C_RESET} <query>            Search nixpkgs
+  ${C_BOLD}catalog${C_RESET} [--json]          Show the curated app catalogue
+  ${C_BOLD}verify${C_RESET}                    Check every catalogue entry against $SYSTEM and cache it
+  ${C_BOLD}status${C_RESET} [--brief]          Profile summary (--brief prints the app count)
+  ${C_BOLD}doctor${C_RESET}                    Diagnose the Nix + Omarchy integration
+  ${C_BOLD}gc${C_RESET}                        Trim old generations and collect garbage
+
+Config: $CONFIG_FILE
+Catalogue: $CATALOG
+EOS
+}
+
+main() {
+  local cmd="${1:-help}"
+  [[ $# -gt 0 ]] && shift
+  case "$cmd" in
+    setup) cmd_setup "$@" ;;
+    install | add) cmd_install "$@" ;;
+    remove | rm | uninstall) cmd_remove "$@" ;;
+    list | ls) cmd_list "$@" ;;
+    update | upgrade) cmd_update "$@" ;;
+    search) cmd_search "$@" ;;
+    catalog | catalogue) cmd_catalog "$@" ;;
+    verify) cmd_verify "$@" ;;
+    status) cmd_status "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    gc) cmd_gc "$@" ;;
+    menu | pick) cmd_menu "$@" ;;
+    help | -h | --help) usage ;;
+    *) usage; die "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
