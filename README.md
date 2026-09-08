@@ -129,8 +129,14 @@ omarchy-nix catalog [--json]
 omarchy-nix verify               Check the whole catalogue against this system
 omarchy-nix status [--brief]
 omarchy-nix doctor
-omarchy-nix gc
+omarchy-nix gc                   Trim old generations and collect garbage
 ```
+
+`install` and `update` end with a `gc` of their own, so the store does not
+quietly accumulate every closure you have ever replaced. Set
+`NIX_APPS_GC_AFTER=0` if you would rather run it yourself. Generations are
+gcroots, so an upgrade's old closure only becomes collectable once the
+generation holding it is older than `NIX_APPS_GC_KEEP` (7 days by default).
 
 ```bash
 omarchy-nix install vscode blender kicad
@@ -276,6 +282,8 @@ section, and `install spotify` just installs Spotify.
 ```bash
 NIX_APPS_FLAKE="nixpkgs"          # or github:NixOS/nixpkgs/nixos-unstable to pin
 NIX_APPS_ALLOW_UNFREE=1           # 0 refuses VS Code, Obsidian, Sublime, Brave
+NIX_APPS_GC_AFTER=1               # 0 stops the gc that follows install and update
+# NIX_APPS_GC_KEEP="7d"           # how old a generation must be before gc drops it
 # NIX_APPS_CATALOG="$HOME/.config/omarchy-nix/apps.json"   # your own catalogue
 # NIX_APPS_INDEX_MAX_AGE=604800   # how stale the package list may get, seconds
 # NIX_APPS_UPDATE_MAX_AGE=21600   # how stale the update check may get, seconds
