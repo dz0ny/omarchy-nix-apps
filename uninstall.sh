@@ -37,6 +37,16 @@ for f in "$APPS_DIR"/*.desktop; do
 done
 ok "$count entr(ies) removed from $APPS_DIR"
 
+info "Removing the PATH shims"
+SHIM_DIR="${NIX_APPS_SHIM_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-nix/bin}"
+count=0
+for f in "$SHIM_DIR"/*; do
+  [[ -f $f ]] || continue
+  grep -qF '# omarchy-nix shim' "$f" 2>/dev/null || continue
+  rm -f "$f" && ((count++))
+done
+ok "$count shim(s) removed from $SHIM_DIR"
+
 if [[ -f $ENV_FILE ]]; then
   info "Removing the session environment file"
   rm -f "$ENV_FILE"

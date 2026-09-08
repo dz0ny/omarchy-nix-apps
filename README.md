@@ -122,7 +122,7 @@ omarchy-nix update [app...]
 omarchy-nix updates [--brief]    What an upgrade would change (cached)
 omarchy-nix exec <cmd> [args]    Run a Nix app with the graphics driver wired up
 omarchy-nix gl [--refresh]       Install or update that driver, or re-probe it
-omarchy-nix sync                 Re-mirror the desktop entries
+omarchy-nix sync                 Re-mirror the desktop entries and the shims
 omarchy-nix index [--refresh]    Rebuild the list of packages that build here
 omarchy-nix search <query>
 omarchy-nix catalog [--json]
@@ -227,6 +227,38 @@ the launcher rather than doubling it — with `Exec` routed through `omarchy-nix
 exec` and an `X-Omarchy-Nix=true` marker so the plugin only ever prunes its own.
 `omarchy-nix sync` redoes it by hand.
 
+**And a shim for anything that starts an app by name.** The mirrored `.desktop`
+only covers the launcher. Type `ghostty` at a prompt — or let
+`xdg-terminal-exec`, a keybinding or a script do it — and you get the bare store
+binary with no `__EGL_VENDOR_LIBRARY_FILENAMES`, so it opens a window that never
+draws. That looks exactly like a crash.
+
+So every GUI app in the profile also gets a two-line shim in
+`~/.local/state/omarchy-nix/bin` (`NIX_APPS_SHIM_DIR`), which the session env
+file **prepends** to PATH — the one thing it prepends, next to the profile it
+appends:
+
+```sh
+#!/bin/sh
+# omarchy-nix shim for ghostty — the Nix build, with the graphics driver wired up.
+exec omarchy-nix exec "$HOME/.nix-profile/bin/ghostty" "$@"
+```
+
+It execs the profile path rather than the name, or `omarchy-nix exec` would
+resolve `ghostty` through PATH, find the shim, and call itself. Only GUI apps
+get one — a CLI tool needs no driver — and a name the system already answers to
+never gets one, because appending the profile to PATH instead of prepending it
+is a deliberate choice the shim would otherwise undo. That guard is what makes
+prepending safe — and it is why the shims cannot live in `~/.local/bin`: uwsm
+sources this plugin's env file before whatever puts `~/.local/bin` on PATH, so
+the Nix profile ends up ahead of it and a shim there would never be reached.
+`omarchy-nix doctor` checks the shims still win the lookup; `uninstall.sh`
+takes them with it.
+
+New shims reach a running session only after a re-login — uwsm reads `env.d`
+once, at session start. Until then the launcher still works, because it goes
+through the mirrored `.desktop`.
+
 ## The catalogue
 
 `apps.json` is a curated list of ~50 large applications with their nixpkgs
@@ -284,6 +316,7 @@ NIX_APPS_FLAKE="nixpkgs"          # or github:NixOS/nixpkgs/nixos-unstable to pi
 NIX_APPS_ALLOW_UNFREE=1           # 0 refuses VS Code, Obsidian, Sublime, Brave
 NIX_APPS_GC_AFTER=1               # 0 stops the gc that follows install and update
 # NIX_APPS_GC_KEEP="7d"           # how old a generation must be before gc drops it
+# NIX_APPS_SHIM_DIR="$HOME/.local/state/omarchy-nix/bin"  # where the app shims go
 # NIX_APPS_CATALOG="$HOME/.config/omarchy-nix/apps.json"   # your own catalogue
 # NIX_APPS_INDEX_MAX_AGE=604800   # how stale the package list may get, seconds
 # NIX_APPS_UPDATE_MAX_AGE=21600   # how stale the update check may get, seconds

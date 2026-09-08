@@ -47,6 +47,12 @@ GC_AFTER="${NIX_APPS_GC_AFTER:-1}"
 # How old a profile generation has to be before a gc drops it. Generations are
 # gcroots, so this is what decides how much a gc can actually free.
 GC_KEEP="${NIX_APPS_GC_KEEP:-7d}"
+# Where the shims that put Nix GUI apps on PATH with a working driver go. It
+# has to be found before ~/.nix-profile/bin, and ~/.local/bin is not: uwsm
+# sources our env file before whatever appends ~/.local/bin, so the profile
+# lands ahead of it. A directory of our own, prepended by the same env file
+# that appends the profile, is the only order we can actually guarantee.
+SHIM_DIR="${NIX_APPS_SHIM_DIR:-$STATE_DIR/bin}"
 INSTALLER_URL="${NIX_APPS_INSTALLER_URL:-https://install.determinate.systems/nix}"
 
 # uname and nixpkgs mostly agree on machine names; the ones below are where
@@ -447,6 +453,9 @@ gl_env() {
 # started from a terminal cannot find a driver.
 cmd_exec() {
   (($#)) || die "usage: omarchy-nix exec <command> [args...]"
+  # Resolve a bare name against the profile before PATH gets a say: PATH holds
+  # the shims, and a shim that lands back here would call itself forever.
+  [[ $1 != */* && -x $HOME/.nix-profile/bin/$1 ]] && set -- "$HOME/.nix-profile/bin/$1" "${@:2}"
   if gl_ready; then
     local vendor
     vendor=$(gl_vendor_json)
@@ -524,8 +533,109 @@ sync_desktop_entries() {
   return 0
 }
 
+# -------------------------------------------------------------------- shims
+
+# A Nix GUI app started straight off PATH gets no graphics driver. The store
+# build looks for its EGL vendor through __EGL_VENDOR_LIBRARY_FILENAMES, and
+# only `omarchy-nix exec` sets that, so the app comes up with no renderer —
+# a window that never draws, which reads as a crash. The launcher is fine: it
+# goes through the mirrored .desktop file, which already has the wrapper. What
+# is not fine is everything that runs the binary by its name — a terminal,
+# xdg-terminal-exec, a script, you at a prompt.
+#
+# So each GUI app in the profile gets a two-line shim ahead of it on PATH.
+# Only the GUI ones: a CLI tool needs no driver, and a shim would buy it
+# nothing but an extra fork.
+SHIM_MARK="# omarchy-nix shim"
+
+is_shim() { [[ -f $1 ]] && grep -qF "$SHIM_MARK" "$1" 2>/dev/null; }
+
+# The commands the profile's own desktop entries launch, one per line. Both
+# spellings turn up in nixpkgs — a bare name, and an absolute store path.
+shim_commands() {
+  local src="$HOME/.nix-profile/share/applications" f line cmd
+  [[ -d $src ]] || return 0
+  for f in "$src"/*.desktop; do
+    [[ -f $f ]] || continue
+    while IFS= read -r line; do
+      cmd=${line#*=}      # drop "Exec="
+      cmd=${cmd%% *}      # the program, not its arguments
+      cmd=${cmd##*/}      # the name, not the store path it may be spelled as
+      [[ -n $cmd ]] || continue
+      [[ -x $HOME/.nix-profile/bin/$cmd ]] || continue
+      printf '%s\n' "$cmd"
+    done < <(grep -h '^Exec[[:space:]]*=' "$f" 2>/dev/null)
+  done | sort -u
+}
+
+# Anything of that name already on PATH, ignoring our own shim directory and
+# the Nix profile itself.
+shim_conflict() {
+  local cmd="$1" dir dirs
+  IFS=: read -ra dirs <<<"$PATH"
+  for dir in "${dirs[@]}"; do
+    [[ -z $dir || $dir == "$SHIM_DIR" ]] && continue
+    [[ $dir == "$HOME/.nix-profile/bin" || $dir == /nix/var/nix/profiles/default/bin ]] && continue
+    [[ -x $dir/$cmd ]] && { printf '%s\n' "$dir/$cmd"; return 0; }
+  done
+  return 1
+}
+
+# The shim runs the profile path, not the name: `omarchy-nix exec` would
+# otherwise resolve the name through PATH, find this shim, and call itself.
+write_shim() {
+  local cmd="$1" path="$SHIM_DIR/$1" tmp
+  tmp=$(mktemp)
+  cat >"$tmp" <<EOF
+#!/bin/sh
+$SHIM_MARK for $cmd — the Nix build, with the graphics driver wired up.
+# Written by omarchy-nix. Delete it and $cmd is a plain PATH lookup again.
+exec omarchy-nix exec "\$HOME/.nix-profile/bin/$cmd" "\$@"
+EOF
+  if cmp -s "$tmp" "$path" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$path"
+  chmod 755 "$path"
+  return 0
+}
+
+sync_shims() {
+  mkdir -p "$SHIM_DIR"
+  local wanted=() cmd f base
+  mapfile -t wanted < <(shim_commands)
+
+  # Drop the ones we wrote for apps that are no longer installed.
+  for f in "$SHIM_DIR"/*; do
+    [[ -f $f ]] || continue
+    is_shim "$f" || continue
+    base="${f##*/}"
+    [[ -x $HOME/.nix-profile/bin/$base ]] || rm -f "$f"
+  done
+
+  for cmd in "${wanted[@]}"; do
+    # Something else on PATH already answers to this name. The plugin defers
+    # to the system everywhere else — the profile is appended to PATH, not
+    # prepended — and a shim here would quietly invert that, so drop ours if
+    # we had one and leave the name alone.
+    if shim_conflict "$cmd" >/dev/null; then
+      is_shim "$SHIM_DIR/$cmd" && rm -f "$SHIM_DIR/$cmd"
+      continue
+    fi
+    # A file of that name that is not ours belongs to whoever wrote it.
+    if [[ -e $SHIM_DIR/$cmd ]] && ! is_shim "$SHIM_DIR/$cmd"; then
+      warn "$SHIM_DIR/$cmd exists and is not ours — leaving it; $cmd will start without a driver"
+      continue
+    fi
+    write_shim "$cmd"
+  done
+  return 0
+}
+
 refresh_desktop_db() {
   sync_desktop_entries
+  sync_shims
   return 0
 }
 
@@ -562,6 +672,21 @@ if [ -d "$HOME/.nix-profile/bin" ]; then
   export PATH
 fi
 
+# Prepended, unlike the profile above, and for the same reason the profile is
+# not: this directory holds one shim per Nix GUI app, and omarchy-nix only
+# writes a shim for a name nothing else on PATH answers to. It has to come
+# before ~/.nix-profile/bin or the bare store binary wins and the app starts
+# with no graphics driver — a window that never draws.
+_omarchy_nix_shims="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-nix/bin"
+if [ -d "$_omarchy_nix_shims" ]; then
+  case ":$PATH:" in
+    *":$_omarchy_nix_shims:"*) ;;
+    *) PATH="$_omarchy_nix_shims:$PATH" ;;
+  esac
+  export PATH
+fi
+unset _omarchy_nix_shims
+
 if [ -z "${NIX_SSL_CERT_FILE:-}" ] && [ -r /etc/ssl/certs/ca-certificates.crt ]; then
   export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 fi
@@ -591,6 +716,11 @@ NIX_APPS_GC_AFTER=1
 # more rollback history, at the cost of the store holding on to the closures
 # those generations pin.
 # NIX_APPS_GC_KEEP="7d"
+
+# Where the shims that put Nix GUI apps on PATH with a working graphics driver
+# are written. The session env file prepends this one; point it somewhere else
+# and putting it ahead of ~/.nix-profile/bin is on you.
+# NIX_APPS_SHIM_DIR="$HOME/.local/state/omarchy-nix/bin"
 
 # Path to an alternative app catalogue.
 # NIX_APPS_CATALOG="$HOME/.config/omarchy-nix/apps.json"
@@ -1519,6 +1649,29 @@ cmd_doctor() {
     warn "$mirrored of $profile_entries entries mirrored — run: omarchy-nix sync"
   fi
 
+  # A shim is only worth anything if it is found before the profile it wraps,
+  # so check what the name actually resolves to rather than trusting the order.
+  local shims=0 first_shim="" resolved sf
+  for sf in "$SHIM_DIR"/*; do
+    [[ -f $sf ]] && is_shim "$sf" || continue
+    ((shims++))
+    [[ -z $first_shim ]] && first_shim="${sf##*/}"
+  done
+  if [[ -z $first_shim ]]; then
+    ok "no GUI apps needing a shim in $SHIM_DIR"
+  else
+    resolved=$(type -P "$first_shim" 2>/dev/null || true)
+    if [[ $resolved == "$SHIM_DIR/$first_shim" ]]; then
+      ok "$shims shim(s) in $SHIM_DIR, ahead of the profile on PATH"
+    else
+      warn "$shims shim(s) in $SHIM_DIR, but '$first_shim' resolves to ${resolved:-nothing}"
+      warn "the shim directory has to come before ~/.nix-profile/bin on PATH, or GUI"
+      warn "apps started by name come up with no graphics driver. Rewrite the session"
+      warn "env file with: omarchy-nix setup --env-only   (then log out and back in)"
+      ((problems++))
+    fi
+  fi
+
   info "Graphics"
   if gl_ready; then
     ok "driver: $(readlink -f "$GL_PROFILE" 2>/dev/null)"
@@ -1586,7 +1739,7 @@ ${C_BOLD}omarchy-nix${C_RESET} — big desktop apps from nixpkgs, for architectu
   ${C_BOLD}update${C_RESET} [app...]           Upgrade everything, or just these
   ${C_BOLD}exec${C_RESET} <command> [args]     Run a Nix app with the graphics driver wired up
   ${C_BOLD}gl${C_RESET} [--refresh|--probe]    Install or update that driver, or re-probe the renderer
-  ${C_BOLD}sync${C_RESET}                      Re-mirror the Nix desktop entries into the launcher
+  ${C_BOLD}sync${C_RESET}                      Re-mirror the desktop entries and the PATH shims
   ${C_BOLD}search${C_RESET} <query>            Search nixpkgs
   ${C_BOLD}catalog${C_RESET} [--json]          Show the curated app catalogue
   ${C_BOLD}verify${C_RESET}                    Check every catalogue entry against $SYSTEM and cache it
@@ -1622,7 +1775,7 @@ main() {
     updates) cmd_updates "$@" ;;
     exec) cmd_exec "$@" ;;
     gl) cmd_gl "$@" ;;
-    sync) require_nix; sync_desktop_entries && ok "Desktop entries synced to $DESKTOP_DIR" ;;
+    sync) require_nix; refresh_desktop_db && ok "Desktop entries synced to $DESKTOP_DIR, shims to $SHIM_DIR" ;;
     index) cmd_index "$@" ;;
     info) cmd_info "$@" ;;
     help | -h | --help) usage ;;
